@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.asn1;
 
 {' DER (Distinguished Encoding Rules) ASN.1 parser — layer 2 (certificates).

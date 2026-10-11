@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_asn1;
 
 { Tests for DER/ASN.1 parser (tls.asn1): ParseDER, EncodeDER, ReadOID,

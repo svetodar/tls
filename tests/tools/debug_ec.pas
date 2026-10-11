@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 program debug_ec;
 {$mode objfpc}{$H+}
 uses

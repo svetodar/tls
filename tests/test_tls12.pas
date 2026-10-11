@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_tls12;
 {TLS 1.2 tests (RFC 5246): ITLSTransport mock transport, record layer,
   handshake flight and failure/error handling.

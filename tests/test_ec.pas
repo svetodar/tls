@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_ec;
 
 {EC tests (tls.ec): P-256, P-384, ECDHE, ECDSA.

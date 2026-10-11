@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.sha2;
 
 { SHA-256 / SHA-384 / SHA-512 (FIPS 180-4) in pure Pascal.

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_chacha;
 { Tests for ChaCha20, Poly1305 and AEAD ChaCha20-Poly1305 (RFC 8439). }
 

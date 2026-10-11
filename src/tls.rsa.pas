@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.rsa;
 
 {RSA (RFC 8017) in pure Pascal.

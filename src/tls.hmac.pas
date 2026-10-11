@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.hmac;
 
 { HMAC (RFC 2104) on SHA-256/384/512.

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_rsa;
 
 {RSA tests (tls.rsa): key generation, encryption, PKCS#1 v1.5 and PSS signatures.

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_aes;
 {AES-128/192/256 tests: ECB/CBC (FIPS-197, SP 800-38A),
   GCM (SP 800-38D) and error handling.}

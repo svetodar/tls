@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_tls12_e2e;
 { E2E test TLS 1.2 (milestone D): full client handshake and data exchange
   with a real `openssl s_server` server (following the pattern of the integration test

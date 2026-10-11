@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_sha2;
 { Tests for SHA-256/384/512 and HMAC (FIPS 180-4, RFC 4231). }
 

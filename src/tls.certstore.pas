@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.certstore;
 
 {' Certificate store and chain verification (RFC 5280 §6).

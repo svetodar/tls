@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_bn;
 {Tests for arbitrary-precision integer arithmetic (tls.bn).
   Known vectors + properties (a = q*b + r, a*inv ≡ 1 mod m, etc.).}

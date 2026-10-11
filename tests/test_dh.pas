@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_dh;
 
 {Tests DH (tls.dh): symmetry of ComputeSecret, vectors, RFC 3526 groups.}

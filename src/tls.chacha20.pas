@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.chacha20;
 
 { ChaCha20 (RFC 8439), Poly1305 (RFC 8439) and AEAD ChaCha20-Poly1305.

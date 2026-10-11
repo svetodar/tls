@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.x509;
 
 { X.509 (RFC 5280) — parsing of a v3 certificate into a structured object.

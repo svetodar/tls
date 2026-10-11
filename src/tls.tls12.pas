@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.tls12;
 
 {TLS 1.2 client (RFC 5246) for task 12 (docs/tasks/12-tls12.md).

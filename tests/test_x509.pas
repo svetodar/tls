@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_x509;
 
 { Tests for X.509 parser (tls.x509): ParseCertificate, certificate fields,

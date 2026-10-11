@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 program testrunner;
 { Unit tests for the tls library (fpcunit). Run with `make test`. }
 

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.bn;
 
 {Arbitrary-precision integer arithmetic (BN) in pure Pascal.

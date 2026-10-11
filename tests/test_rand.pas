@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit test_rand;
 {CSPRNG tests (tls.rand): HMAC-DRBG, entropy and statistics.}
 

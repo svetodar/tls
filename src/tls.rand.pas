@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.rand;
 
 { CSPRNG: HMAC-DRBG (NIST SP 800-90A) on SHA-256.

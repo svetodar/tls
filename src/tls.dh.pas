@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.dh;
 
 { Diffie–Hellman in finite fields (DHE) in pure Pascal.

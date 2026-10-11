@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 }
 unit tls.prf;
 
 { TLS 1.2 PRF (RFC 5246, section 5): P_hash based on HMAC-SHA256/384/512.
