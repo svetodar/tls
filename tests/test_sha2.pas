@@ -20,10 +20,12 @@ type
     procedure TestSHA384Abc;
     procedure TestSHA384TwoBlocks;
     procedure TestSHA384MillionA;
+    procedure TestSHA384PaddingBoundary;
     procedure TestSHA512Empty;
     procedure TestSHA512Abc;
     procedure TestSHA512TwoBlocks;
     procedure TestSHA512MillionA;
+    procedure TestSHA512PaddingBoundary;
     procedure TestIncrementalEqualsOneShot;
     procedure TestHMAC256RFC4231;
     procedure TestHexRoundTrip;
@@ -106,6 +108,19 @@ begin
     BytesToHex(SHA384(Data)));
 end;
 
+procedure TSHA2Tests.TestSHA384PaddingBoundary;
+begin
+  { FIPS 180-2 example: a 112-byte message. 112 mod 128 = 112 exercises the
+    two-block padding path of SHA-384/512, where the 16-byte length field
+    must start at byte 112 (not at byte 120 as for the 8-byte SHA-256 field). }
+  AssertEquals('SHA-384(112B FIPS example)',
+    '09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712' +
+    'fcc7c71a557e2db966c3e9fa91746039',
+    BytesToHex(SHA384Str(
+      'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn' +
+      'hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu')));
+end;
+
 {--- SHA-512 ---}
 
 procedure TSHA2Tests.TestSHA512Empty;
@@ -140,6 +155,18 @@ begin
   AssertEquals('SHA-512(1M "a")',
     'e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b',
     BytesToHex(SHA512(Data)));
+end;
+
+procedure TSHA2Tests.TestSHA512PaddingBoundary;
+begin
+  { The same 112-byte FIPS 180-2 message as the SHA-384 padding test:
+    SHA-512 must also place its 16-byte length field at byte 112. }
+  AssertEquals('SHA-512(112B FIPS example)',
+    '8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb68890185' +
+    '01d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909',
+    BytesToHex(SHA512Str(
+      'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn' +
+      'hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu')));
 end;
 
 {--- Incremental == one-shot ---}

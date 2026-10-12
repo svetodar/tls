@@ -123,12 +123,17 @@ end;
 procedure TSHA2Base.Final(var Digest: TBytes);
 var
   bitLen: QWord;
-  i: LongWord;
+  lenBytes, i: LongWord;
 begin
   if FFinalized then
     raise Exception.Create('TSHA2: Final called twice');
   FFinalized := True;
   bitLen := FTotalLen * 8;
+  { Size of the big-endian length field appended by the padding (FIPS 180-4,
+    5.1.1 and 5.1.2): 8 bytes for a 64-byte block (SHA-224/256) and 16 bytes
+    for a 128-byte block (SHA-384/512). The high bytes of the 128-bit length
+    are zero because FTotalLen is a 64-bit counter. }
+  lenBytes := FBlockLen div 8;
   { If Update ended exactly on a block boundary, the block has not yet been processed:
     process it before writing byte $80 (otherwise the write would go past FBuf). }
   if FBufLen = FBlockLen then
@@ -138,7 +143,7 @@ begin
   end;
   FBuf[FBufLen] := $80;
   Inc(FBufLen);
-  if FBufLen > FBlockLen - 8 then
+  if FBufLen > FBlockLen - lenBytes then
   begin
     while FBufLen < FBlockLen do
     begin
@@ -148,10 +153,18 @@ begin
     ProcessBlock(FBuf);
     FBufLen := 0;
   end;
-  while FBufLen < FBlockLen - 8 do
+  while FBufLen < FBlockLen - lenBytes do
   begin
     FBuf[FBufLen] := 0;
     Inc(FBufLen);
+  end;
+  { Zero the high bytes of the length field (SHA-384/512: the field is 16
+    bytes wide, of which only the low 8 carry the counter). }
+  i := FBlockLen - lenBytes;
+  while i < FBlockLen - 8 do
+  begin
+    FBuf[i] := 0;
+    Inc(i);
   end;
   for i := 0 to 7 do
     FBuf[FBlockLen - 8 + i] := Byte(bitLen shr (56 - 8 * i));
