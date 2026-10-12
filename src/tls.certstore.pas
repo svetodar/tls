@@ -446,14 +446,27 @@ begin
     hasSAN := False;
     for i := 0 to san.Count - 1 do
     begin
-      if san.At(i).Kind = sanDNS then
-      begin
-        hasSAN := True;
-        if WildcardMatch(san.At(i).Value, Host) then
-        begin
-          Result := True;
-          Exit;
-        end;
+      case san.At(i).Kind of
+        sanDNS:
+          begin
+            hasSAN := True;
+            if WildcardMatch(san.At(i).Value, Host) then
+            begin
+              Result := True;
+              Exit;
+            end;
+          end;
+        sanIP:
+          begin
+            hasSAN := True;
+            {RFC 6125: an IP address is matched byte-for-byte against an
+              iPAddress subjectAltName, never against a DNS wildcard.}
+            if san.At(i).Value = Host then
+            begin
+              Result := True;
+              Exit;
+            end;
+          end;
       end;
     end;
     {If SAN is present — do not check CN (RFC 6125 §6.4.3).}

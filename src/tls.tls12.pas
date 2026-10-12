@@ -539,6 +539,79 @@ type
     function BytesAvailable: LongInt;
     property Stream: TStream read FStream;
   end;
+  {High-level TLS 1.2 client (RFC 5246): performs the full handshake over
+    ITLSTransport and provides Send/Recv for application data.
+
+    The client is single-use: one Connect() per instance. After the
+    handshake completes, Send/Recv operate on the encrypted channel.
+
+    Certificate verification: if TrustStore is set (non-nil), the server
+    certificate chain is verified against it during Connect. If TrustStore
+    is nil, no chain verification is performed (the chain is still parsed
+    and available via CertChain).
+
+    Only ephemeral key exchange (ECDHE/DHE) with AEAD cipher suites is
+    supported. CBC and static-RSA suites are rejected with ETLS12Error. }
+  TTLS12Client = class
+  private
+    FTransport: ITLSTransport;
+    FOptions: TTLSClientHelloOptions;
+    FBuffer: TTLSHandshakeBuffer;
+    FChain: TTLS12CertChain;
+    FTrustStore: TCertStore;
+    FConnected: Boolean;
+    FHandshakeDone: Boolean;
+    FCipherSuite: TTLSCipherSuite;
+    FAEADMode: TTLSAEADMode;
+    FHashKind: THashKind;
+    FClientWriteKey: TBytes;
+    FServerWriteKey: TBytes;
+    FClientWriteIV: TBytes;
+    FServerWriteIV: TBytes;
+    FClientSeq: QWord;
+    FServerSeq: QWord;
+    FMasterSecret: TBytes;
+    FRecvBuf: TBytes;
+    FRecvPos: Integer;
+    function GetHandshakeDone: Boolean;
+    function GetCipherSuite: TTLSCipherSuite;
+    function GetPendingBytes: LongInt;
+    procedure DoHandshake;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    {Configuration (set before Connect).}
+    property Options: TTLSClientHelloOptions read FOptions write FOptions;
+    {Optional trust store for certificate verification (not owned by client).
+      If nil, no chain verification is performed.}
+    property TrustStore: TCertStore read FTrustStore write FTrustStore;
+    {Performs the TLS 1.2 handshake over ATransport.
+      Raises ETLS12Error on any protocol or verification error.}
+    procedure Connect(ATransport: ITLSTransport);
+    {Sends application data over the encrypted channel.
+      Must be called after a successful Connect.}
+    procedure Send(const AData: TBytes);
+    {Receives application data. Returns the number of bytes read:
+      > 0 — bytes read into ABuffer;
+      = 0 — connection closed by peer (close_notify or EOF);
+      < 0 — error (TLSTransportError).
+      Must be called after a successful Connect.}
+    function Recv(var ABuffer; ACount: LongInt): LongInt;
+    {Sends close_notify alert and closes the connection.}
+    procedure Shutdown;
+    {Closes the connection without sending close_notify.}
+    procedure Close;
+    {Whether the handshake has completed.}
+    property HandshakeDone: Boolean read GetHandshakeDone;
+    {Negotiated cipher suite (valid after Connect).}
+    property CipherSuite: TTLSCipherSuite read GetCipherSuite;
+    {Server certificate chain (owned by the client; freed in Destroy).
+      nil if the server did not send a Certificate message.}
+    function CertChain: TTLS12CertChain;
+    {Number of decrypted application-data bytes still buffered inside the
+      client (analogous to SSL_pending / OpenSSL's BytesAvailable).}
+    property PendingBytes: LongInt read GetPendingBytes;
+  end;
 
 {--- Record layer: type conversion and header ------------------- }
 
@@ -964,6 +1037,8 @@ function ReadTLS12Alert(ATransport: ITLSTransport): TTLSAlert;
 
 {Whether the alert is fatal (level 2).}
 function TLS12AlertIsFatal(const AAlert: TTLSAlert): Boolean;
+
+
 
 
 implementation
@@ -3428,5 +3503,392 @@ function TLS12AlertIsFatal(const AAlert: TTLSAlert): Boolean;
 begin
   Result := AAlert.Level = alFatal;
 end;
+
+{ --- TTLS12Client ---------------------------------------------------- }
+
+function TTLS12Client.GetHandshakeDone: Boolean;
+begin
+  Result := FHandshakeDone;
+end;
+
+function TTLS12Client.GetCipherSuite: TTLSCipherSuite;
+begin
+  Result := FCipherSuite;
+end;
+
+function TTLS12Client.GetPendingBytes: LongInt;
+begin
+  Result := Length(FRecvBuf) - FRecvPos;
+  if Result < 0 then
+    Result := 0;
+end;
+
+function TTLS12Client.CertChain: TTLS12CertChain;
+begin
+  Result := FChain;
+end;
+
+constructor TTLS12Client.Create;
+begin
+  inherited Create;
+  FOptions := DefaultTLS12ClientHelloOptions;
+  FBuffer := TTLSHandshakeBuffer.Create;
+  FChain := nil;
+  FTrustStore := nil;
+  FConnected := False;
+  FHandshakeDone := False;
+  FCipherSuite := 0;
+  FAEADMode := aeadAES128GCM;
+  FHashKind := hkSHA256;
+  FClientWriteKey := nil;
+  FServerWriteKey := nil;
+  FClientWriteIV := nil;
+  FServerWriteIV := nil;
+  FClientSeq := 0;
+  FServerSeq := 0;
+  FMasterSecret := nil;
+  FRecvBuf := nil;
+  FRecvPos := 0;
+end;
+
+destructor TTLS12Client.Destroy;
+begin
+  if FChain <> nil then
+    FChain.Free;
+  if FBuffer <> nil then
+    FBuffer.Free;
+  inherited Destroy;
+end;
+
+procedure TTLS12Client.DoHandshake;
+var
+  ClientRandom, HelloBody, CKEBody, Premaster, SessionHash: TBytes;
+  FinishedBody, FinMsg, ClientVD, ServerVD, Frag, Plain: TBytes;
+  ServerMsgs: TTLSHandshakeMessages;
+  Hello: TTLSServerHello;
+  CertMsg: TTLSCertificateMessage;
+  SKE: TTLSServerKeyExchange;
+  HasCert, HasSKE: Boolean;
+  VR: TVerifyResult;
+  EKey: TTLS12ECDHEClientKey;
+  DKey: TTLS12DHEClientKey;
+  KB: TTLS12KeyBlock;
+  Rec: TTLSRecord;
+  Fin: TTLSHandshakeMessage;
+begin
+  FBuffer.Clear;
+
+  { --- ClientHello --- }
+  RandomBytes(ClientRandom, TLSClientRandomLen);
+  FOptions.ClientRandom := ClientRandom;
+  HelloBody := BuildTLS12ClientHelloBody(FOptions);
+  WriteTLSHandshakeMessage(FTransport, htClientHello, HelloBody);
+  FBuffer.AppendTranscript(htClientHello, HelloBody);
+
+  { --- Server flight: ServerHello, Certificate, ServerKeyExchange,
+    ServerHelloDone --- }
+  if not ReadTLSHandshakeFlight(FTransport, FBuffer,
+    [htServerHelloDone], ServerMsgs) then
+    raise ETLS12Error.Create(
+      'TLS 1.2: server closed connection before ServerHelloDone');
+  if not ParseTLS12ServerFlight(ServerMsgs, Hello, CertMsg, SKE,
+    HasCert, HasSKE) then
+    raise ETLS12Error.Create(
+      'TLS 1.2: failed to parse server flight');
+  if not HasCert then
+    raise ETLS12Error.Create(
+      'TLS 1.2: server did not send Certificate');
+  if not HasSKE then
+    raise ETLS12Error.Create(
+      'TLS 1.2: server did not send ServerKeyExchange');
+
+  { --- Parse and verify certificate chain --- }
+  if FChain <> nil then
+    FChain.Free;
+  FChain := ParseTLS12CertChain(CertMsg);
+  if (FTrustStore <> nil) and (FChain.Count > 0) then
+  begin
+    VR := FChain.Verify(FTrustStore);
+    if not VR.OK then
+      raise ETLS12Error.CreateFmt(
+        'TLS 1.2: certificate chain verification failed: %s', [VR.Reason]);
+  end;
+
+  { --- Verify ServerKeyExchange signature --- }
+  if not VerifyTLS12ServerKeyExchange(FChain, ClientRandom,
+    Hello.ServerRandom, SKE) then
+    raise ETLS12Error.Create(
+      'TLS 1.2: ServerKeyExchange signature is invalid');
+
+  { --- Negotiated parameters --- }
+  FCipherSuite := Hello.CipherSuite;
+  FAEADMode := TLS12CipherSuiteAEADMode(FCipherSuite);
+  FHashKind := TLS12CipherSuiteHashKind(FCipherSuite);
+
+  { --- ClientKeyExchange and premaster secret --- }
+  Premaster := nil;
+  if SKE.Algorithm = keaECDHE then
+  begin
+    EKey := TTLS12ECDHEClientKey.Create(SKE.NamedCurve);
+    try
+      CKEBody := EKey.ClientKeyExchangeBody;
+      WriteTLSHandshakeMessage(FTransport, htClientKeyExchange, CKEBody);
+      FBuffer.AppendTranscript(htClientKeyExchange, CKEBody);
+      Premaster := EKey.PremasterSecret(SKE.ECDHEPublicKey);
+    finally
+      EKey.Free;
+    end;
+  end
+  else if SKE.Algorithm = keaDHE then
+  begin
+    DKey := TTLS12DHEClientKey.Create;
+    try
+      DKey.InitFromServerParams(SKE.DHPrime, SKE.DHGenerator);
+      CKEBody := DKey.ClientKeyExchangeBody;
+      WriteTLSHandshakeMessage(FTransport, htClientKeyExchange, CKEBody);
+      FBuffer.AppendTranscript(htClientKeyExchange, CKEBody);
+      Premaster := DKey.PremasterSecret(SKE.DHPublic);
+    finally
+      DKey.Free;
+    end;
+  end
+  else
+    raise ETLS12Error.CreateFmt(
+      'TLS 1.2: unsupported key exchange algorithm %d',
+      [Ord(SKE.Algorithm)]);
+
+  { --- Master secret and key block --- }
+  if Hello.ExtendedMasterSecret then
+  begin
+    SessionHash := TLS12TranscriptHash(FHashKind, FBuffer.Transcript);
+    FMasterSecret := TLS12ExtendedMasterSecret(FHashKind, Premaster,
+      SessionHash);
+  end
+  else
+    FMasterSecret := TLS12MasterSecret(FHashKind, Premaster,
+      ClientRandom, Hello.ServerRandom);
+  KB := TLS12KeyBlock(FHashKind, FMasterSecret, Hello.ServerRandom,
+    ClientRandom, 0, TLSAEADKeyLength(FAEADMode),
+    TLSAEADFixedIvLength(FAEADMode));
+  FClientWriteKey := KB.ClientWriteKey;
+  FServerWriteKey := KB.ServerWriteKey;
+  FClientWriteIV := KB.ClientWriteIV;
+  FServerWriteIV := KB.ServerWriteIV;
+  FClientSeq := 0;
+  FServerSeq := 0;
+
+  { --- Client CCS + Finished (encrypted) --- }
+  ClientVD := TLS12VerifyData(FHashKind, FMasterSecret,
+    TLSFinishedLabelClient, FBuffer.Transcript);
+  FinishedBody := EncodeTLS12FinishedBody(ClientVD);
+  FBuffer.AppendTranscript(htFinished, FinishedBody);
+  FinMsg := BuildTLS12Finished(ClientVD);
+  WriteTLS12ChangeCipherSpec(FTransport);
+  Frag := TLSAEADEncryptFragment(FAEADMode, FClientWriteKey,
+    FClientWriteIV, QWord(0), ctHandshake, TLS12Version, FinMsg);
+  WriteTLSRecord(FTransport, ctHandshake, Frag);
+  Inc(FClientSeq);
+
+  { --- Server CCS + Finished (encrypted) --- }
+  ReadTLS12ChangeCipherSpec(FTransport);
+  Rec := ReadTLSRecord(FTransport);
+  if Rec.ContentType <> ctHandshake then
+    raise ETLS12Error.CreateFmt(
+      'TLS 1.2: expected handshake record after server CCS, got type %d',
+      [Ord(Rec.ContentType)]);
+  if not TLSAEADDecryptFragment(FAEADMode, FServerWriteKey,
+    FServerWriteIV, QWord(0), Rec.ContentType, Rec.Version,
+    Rec.Fragment, Plain) then
+    raise ETLS12Error.Create(
+      'TLS 1.2: failed to decrypt server Finished');
+  Fin := DecodeTLSHandshakeMessage(Plain);
+  if Fin.MsgType <> htFinished then
+    raise ETLS12Error.Create(
+      'TLS 1.2: server did not send Finished after CCS');
+  ServerVD := ParseTLS12FinishedBody(Fin.Body);
+  if not TLS12VerifyFinished(FHashKind, FMasterSecret,
+    TLSFinishedLabelServer, FBuffer.Transcript, ServerVD) then
+    raise ETLS12Error.Create(
+      'TLS 1.2: server VerifyData mismatch');
+  Inc(FServerSeq);
+
+  FHandshakeDone := True;
+end;
+
+procedure TTLS12Client.Connect(ATransport: ITLSTransport);
+begin
+  if FHandshakeDone then
+    raise ETLS12Error.Create('TLS 1.2: client already connected');
+  if ATransport = nil then
+    raise ETLS12Error.Create('TLS 1.2: transport is nil');
+  FTransport := ATransport;
+  FConnected := True;
+  try
+    DoHandshake;
+  except
+    FConnected := False;
+    raise;
+  end;
+end;
+
+procedure TTLS12Client.Send(const AData: TBytes);
+var
+  Offset, Total, Chunk: Integer;
+  Part, Frag: TBytes;
+begin
+  if not FHandshakeDone then
+    raise ETLS12Error.Create('TLS 1.2: Send before handshake complete');
+  Total := Length(AData);
+  if Total = 0 then
+    Exit;
+  Offset := 0;
+  while Offset < Total do
+  begin
+    Chunk := Total - Offset;
+    if Chunk > TLSRecordMaxPayload then
+      Chunk := TLSRecordMaxPayload;
+    SetLength(Part, Chunk);
+    Move(AData[Offset], Part[0], Chunk);
+    Frag := TLSAEADEncryptFragment(FAEADMode, FClientWriteKey,
+      FClientWriteIV, FClientSeq, ctApplicationData, TLS12Version, Part);
+    WriteTLSRecord(FTransport, ctApplicationData, Frag);
+    Inc(FClientSeq);
+    Inc(Offset, Chunk);
+  end;
+end;
+
+function TTLS12Client.Recv(var ABuffer; ACount: LongInt): LongInt;
+var
+  Rec: TTLSRecord;
+  Plain: TBytes;
+  Alert: TTLSAlert;
+  Avail, ToCopy: LongInt;
+begin
+  if not FHandshakeDone then
+    raise ETLS12Error.Create('TLS 1.2: Recv before handshake complete');
+  if ACount <= 0 then
+    Exit(0);
+
+  Result := 0;
+  while True do
+  begin
+    { Return any buffered plaintext first. }
+    Avail := Length(FRecvBuf) - FRecvPos;
+    if Avail > 0 then
+    begin
+      ToCopy := Avail;
+      if ToCopy > ACount then
+        ToCopy := ACount;
+      Move(FRecvBuf[FRecvPos], ABuffer, ToCopy);
+      Inc(FRecvPos, ToCopy);
+      if FRecvPos >= Length(FRecvBuf) then
+      begin
+        FRecvBuf := nil;
+        FRecvPos := 0;
+      end;
+      Exit(ToCopy);
+    end;
+
+    { Read the next record. }
+    try
+      Rec := ReadTLSRecord(FTransport);
+    except
+      on E: ETLS12Error do
+      begin
+        { Transport closed or error: signal EOF. }
+        Exit(0);
+      end;
+    end;
+
+    case Rec.ContentType of
+      ctApplicationData:
+        begin
+          if not TLSAEADDecryptFragment(FAEADMode, FServerWriteKey,
+            FServerWriteIV, FServerSeq, Rec.ContentType, Rec.Version,
+            Rec.Fragment, Plain) then
+            raise ETLS12Error.Create(
+              'TLS 1.2: failed to decrypt server application data');
+          Inc(FServerSeq);
+          { Append to receive buffer. }
+          if Length(FRecvBuf) = 0 then
+          begin
+            FRecvBuf := Plain;
+            FRecvPos := 0;
+          end
+          else
+          begin
+            SetLength(FRecvBuf, Length(FRecvBuf) + Length(Plain));
+            if Length(Plain) > 0 then
+              Move(Plain[0], FRecvBuf[Length(FRecvBuf) - Length(Plain)],
+                Length(Plain));
+          end;
+          { Return as much as requested. }
+          Avail := Length(FRecvBuf) - FRecvPos;
+          ToCopy := Avail;
+          if ToCopy > ACount then
+            ToCopy := ACount;
+          Move(FRecvBuf[FRecvPos], ABuffer, ToCopy);
+          Inc(FRecvPos, ToCopy);
+          if FRecvPos >= Length(FRecvBuf) then
+          begin
+            FRecvBuf := nil;
+            FRecvPos := 0;
+          end;
+          Exit(ToCopy);
+        end;
+      ctAlert:
+        begin
+          {After the handshake alerts are protected like application data
+            (RFC 5246, 6.2.3), so decrypt before decoding.}
+          if not TLSAEADDecryptFragment(FAEADMode, FServerWriteKey,
+            FServerWriteIV, FServerSeq, Rec.ContentType, Rec.Version,
+            Rec.Fragment, Plain) then
+            raise ETLS12Error.Create(
+              'TLS 1.2: failed to decrypt server alert');
+          Inc(FServerSeq);
+          Alert := DecodeTLSAlert(Plain);
+          if Alert.Description = adCloseNotify then
+            Exit(0);  { Normal closure. }
+          if TLS12AlertIsFatal(Alert) then
+            raise ETLS12Error.CreateFmt(
+              'TLS 1.2: fatal alert from server: %s',
+              [TLSAlertDescriptionName(Alert.Description)]);
+          { Non-fatal warning: continue reading. }
+          Continue;
+        end;
+      ctChangeCipherSpec:
+        begin
+          raise ETLS12Error.Create(
+            'TLS 1.2: unexpected ChangeCipherSpec after handshake');
+        end;
+      ctHandshake:
+        begin
+          raise ETLS12Error.Create(
+            'TLS 1.2: unexpected handshake message after handshake');
+        end;
+    else
+      raise ETLS12Error.CreateFmt(
+        'TLS 1.2: unexpected record type %d after handshake',
+        [Ord(Rec.ContentType)]);
+    end;
+  end;
+end;
+
+procedure TTLS12Client.Shutdown;
+begin
+  if not FConnected then
+    Exit;
+  if FHandshakeDone then
+    WriteTLS12Alert(FTransport, alWarning, adCloseNotify);
+  FConnected := False;
+  FHandshakeDone := False;
+end;
+
+procedure TTLS12Client.Close;
+begin
+  FConnected := False;
+  FHandshakeDone := False;
+end;
+
 
 end.
