@@ -207,7 +207,7 @@ end;
 
 function PointAdd(const Curve: TECCurve; const P, Q: TECPoint): TECPoint;
 var
-  Lambda, Rx, Ry: TBN;
+  Lambda, Rx, Ry, t1, t2: TBN;
 begin
   if P.Infinity then
   begin
@@ -230,15 +230,26 @@ begin
     Exit;
   end;
   { lambda = (Q.y - P.y) * (Q.x - P.x)^-1 mod p }
-  Lambda := Q.Y.ModSub(P.Y, Curve.P);
-  Lambda := Lambda.ModMul(Q.X.ModSub(P.X, Curve.P).ModInverse(Curve.P), Curve.P);
+  t1 := Q.Y.ModSub(P.Y, Curve.P);
+  t2 := Q.X.ModSub(P.X, Curve.P);
+  Lambda := t2.ModInverse(Curve.P);
+  t2.Free;
+  t2 := Lambda.ModMul(t1, Curve.P);
+  Lambda.Free;
+  Lambda := t2;
+  t1.Free;
   { R.x = lambda^2 - P.x - Q.x mod p }
   Rx := Lambda.ModMul(Lambda, Curve.P);
-  Rx := Rx.ModSub(P.X, Curve.P);
-  Rx := Rx.ModSub(Q.X, Curve.P);
+  t1 := Rx.ModSub(P.X, Curve.P);
+  Rx.Free;
+  Rx := t1.ModSub(Q.X, Curve.P);
+  t1.Free;
   { R.y = lambda * (P.x - R.x) - P.y mod p }
-  Ry := Lambda.ModMul(P.X.ModSub(Rx, Curve.P), Curve.P);
-  Ry := Ry.ModSub(P.Y, Curve.P);
+  t1 := P.X.ModSub(Rx, Curve.P);
+  t2 := Lambda.ModMul(t1, Curve.P);
+  t1.Free;
+  Ry := t2.ModSub(P.Y, Curve.P);
+  t2.Free;
   Result := TECPoint.CreateFromXY(Rx, Ry);
   Rx.Free;
   Ry.Free;
@@ -247,7 +258,7 @@ end;
 
 function PointDouble(const Curve: TECCurve; const P: TECPoint): TECPoint;
 var
-  Lambda, Rx, Ry, Two, Three: TBN;
+  Lambda, Rx, Ry, Two, Three, t1, t2: TBN;
 begin
   if P.Infinity then
   begin
@@ -262,16 +273,31 @@ begin
   Two := TBN.CreateFromQWord(2);
   Three := TBN.CreateFromQWord(3);
   { lambda = (3*x^2 + a) * (2*y)^-1 mod p }
-  Lambda := P.X.ModMul(P.X, Curve.P);
-  Lambda := Lambda.ModMul(Three, Curve.P);
-  Lambda := Lambda.ModAdd(Curve.A, Curve.P);
-  Lambda := Lambda.ModMul(Two.ModMul(P.Y, Curve.P).ModInverse(Curve.P), Curve.P);
+  t1 := P.X.ModMul(P.X, Curve.P);
+  t2 := t1.ModMul(Three, Curve.P);
+  t1.Free;
+  t1 := t2.ModAdd(Curve.A, Curve.P);
+  t2.Free;
+  t2 := Two.ModMul(P.Y, Curve.P);
+  Lambda := t2.ModInverse(Curve.P);
+  t2.Free;
+  t2 := t1.ModMul(Lambda, Curve.P);
+  t1.Free;
+  Lambda.Free;
+  Lambda := t2;
   { R.x = lambda^2 - 2*x mod p }
   Rx := Lambda.ModMul(Lambda, Curve.P);
-  Rx := Rx.ModSub(Two.ModMul(P.X, Curve.P), Curve.P);
+  t1 := Two.ModMul(P.X, Curve.P);
+  t2 := Rx.ModSub(t1, Curve.P);
+  t1.Free;
+  Rx.Free;
+  Rx := t2;
   { R.y = lambda * (x - R.x) - y mod p }
-  Ry := Lambda.ModMul(P.X.ModSub(Rx, Curve.P), Curve.P);
-  Ry := Ry.ModSub(P.Y, Curve.P);
+  t1 := P.X.ModSub(Rx, Curve.P);
+  t2 := Lambda.ModMul(t1, Curve.P);
+  t1.Free;
+  Ry := t2.ModSub(P.Y, Curve.P);
+  t2.Free;
   Result := TECPoint.CreateFromXY(Rx, Ry);
   Rx.Free;
   Ry.Free;
@@ -296,7 +322,7 @@ end;
 
 function IsOnCurve(const Curve: TECCurve; const P: TECPoint): Boolean;
 var
-  LHS, RHS, Temp: TBN;
+  LHS, RHS, Temp, Tmp: TBN;
 begin
   if P.Infinity then
   begin
@@ -307,11 +333,17 @@ begin
   LHS := P.Y.ModMul(P.Y, Curve.P);
   { RHS = x^3 + a*x + b mod p }
   RHS := P.X.ModMul(P.X, Curve.P);
-  RHS := RHS.ModMul(P.X, Curve.P);
+  Tmp := RHS.ModMul(P.X, Curve.P);
+  RHS.Free;
+  RHS := Tmp;
   Temp := Curve.A.ModMul(P.X, Curve.P);
-  RHS := RHS.ModAdd(Temp, Curve.P);
+  Tmp := RHS.ModAdd(Temp, Curve.P);
   Temp.Free;
-  RHS := RHS.ModAdd(Curve.B, Curve.P);
+  RHS.Free;
+  RHS := Tmp;
+  Tmp := RHS.ModAdd(Curve.B, Curve.P);
+  RHS.Free;
+  RHS := Tmp;
   Result := LHS.Equal(RHS);
   LHS.Free;
   RHS.Free;
@@ -441,14 +473,16 @@ end;
 
 function GenerateKeyPair(const Curve: TECCurve): TECKeypair;
 var
-  D: TBN;
+  D, T: TBN;
 begin
   Result := TECKeypair.Create;
   { Generate random scalar d in [1, N-1].
     Repeat while d = 0 (probability ~ 2^-256). }
   repeat
     D := TBN.RandomBits(Curve.N.BitLength, @RandomByteGen);
-    D := D.Modulo(Curve.N);
+    T := D.Modulo(Curve.N);
+    D.Free;
+    D := T;
   until not D.IsZero;
   Result.PrivateKey := D;
   Result.PublicKey := ScalarMul(Curve, D, Curve.G);
@@ -494,16 +528,24 @@ end;
 { Convert digest to TBN, truncating/padding to length N. }
 function DigestToBN(const Curve: TECCurve; const Digest: TBytes): TBN;
 var
-  E: TBN;
+  E, T: TBN;
   DigestLen, NLen: LongInt;
 begin
   E := TBN.CreateFromBytes(Digest, True);
   DigestLen := Length(Digest) * 8;
   NLen := Curve.N.BitLength;
   if DigestLen > NLen then
-    E := E.ShiftRight(DigestLen - NLen)
+  begin
+    T := E.ShiftRight(DigestLen - NLen);
+    E.Free;
+    E := T;
+  end
   else if DigestLen < NLen then
-    E := E.ShiftLeft(NLen - DigestLen);
+  begin
+    T := E.ShiftLeft(NLen - DigestLen);
+    E.Free;
+    E := T;
+  end;
   Result := E;
 end;
 
@@ -511,7 +553,7 @@ function ECDSASign(const Curve: TECCurve; const PrivateKey: TBN;
   const Message: TBytes): TECDsaSig;
 var
   Digest: TBytes;
-  E, K, R, S, W, Temp: TBN;
+  E, K, R, S, W, Temp, Tmp: TBN;
   P1: TECPoint;
 begin
   Result := TECDsaSig.Create;
@@ -523,7 +565,9 @@ begin
       { k = random in [1, N-1] }
       repeat
         K := TBN.RandomBits(Curve.N.BitLength, @RandomByteGen);
-        K := K.Modulo(Curve.N);
+        Tmp := K.Modulo(Curve.N);
+        K.Free;
+        K := Tmp;
       until not K.IsZero;
       { (x1, y1) = k * G }
       P1 := ScalarMul(Curve, K, Curve.G);
@@ -539,7 +583,9 @@ begin
       { s = k^-1 * (e + r * d) mod N }
       W := K.ModInverse(Curve.N);
       Temp := R.ModMul(PrivateKey, Curve.N);
-      Temp := Temp.ModAdd(E, Curve.N);
+      Tmp := Temp.ModAdd(E, Curve.N);
+      Temp.Free;
+      Temp := Tmp;
       S := W.ModMul(Temp, Curve.N);
       W.Free;
       Temp.Free;
@@ -567,7 +613,7 @@ function ECDSAVerify(const Curve: TECCurve; const PublicKey: TECPoint;
 var
   Digest: TBytes;
   E, W, U1, U2, V: TBN;
-  P1, P2: TECPoint;
+  P1, P2, TmpP: TECPoint;
 begin
   Result := False;
   { 1. Range check: 1 <= r < N, 1 <= s < N }
@@ -594,7 +640,9 @@ begin
     { 5. (x1, y1) = u1 * G + u2 * Q }
     P1 := ScalarMul(Curve, U1, Curve.G);
     P2 := ScalarMul(Curve, U2, PublicKey);
-    P2 := PointAdd(Curve, P1, P2);
+    TmpP := PointAdd(Curve, P1, P2);
+    P2.Free;
+    P2 := TmpP;
     P1.Free;
 
     { 6. If the point is at infinity, the signature is invalid }

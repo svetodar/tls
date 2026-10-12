@@ -534,16 +534,19 @@ var
   qhat, rhat, plo, phi, u, t, ai, borrow, wa: QWord;
   skipCorr: Boolean;
 begin
-  Q := TBN.Create;
-  Result := TBN.Create;
   if B.IsZero then
     raise EBNError.Create('TBN.Divide: division by zero');
   if IsZero then
+  begin
+    Q := TBN.Create;
+    Result := TBN.Create;
     Exit; { Q = 0, R = 0 }
+  end;
   n := Length(FWords);
   m := Length(B.FWords);
   if n < m then
   begin
+    Q := TBN.Create;
     Result := Clone;
     Exit;
   end;
@@ -796,6 +799,7 @@ var
   q: TBN;
 begin
   Result := Divide(B, q);
+  q.Free;
 end;
 
 function TBN.ModAdd(const B, M: TBN): TBN;
@@ -806,37 +810,53 @@ begin
     raise EBNError.Create('TBN.ModAdd: M = 0');
   s := Add(B);
   Result := s.Modulo(M);
+  s.Free;
 end;
 
 function TBN.ModSub(const B, M: TBN): TBN;
 var
-  a, bm: TBN;
+  a, bm, t: TBN;
 begin
   if M.IsZero then
     raise EBNError.Create('TBN.ModSub: M = 0');
   a := Modulo(M);
   bm := B.Modulo(M);
-  if a.Compare(bm) >= 0 then
-    Result := a.Sub(bm)
-  else
-  begin
-    {M + a - bm in range (0, 2M).}
-    Result := a.Add(M).Sub(bm);
-    if Result.Compare(M) >= 0 then
-      Result := Result.Sub(M);
+  try
+    if a.Compare(bm) >= 0 then
+      Result := a.Sub(bm)
+    else
+    begin
+      {M + a - bm in range (0, 2M).}
+      t := a.Add(M);
+      Result := t.Sub(bm);
+      t.Free;
+      if Result.Compare(M) >= 0 then
+      begin
+        t := Result;
+        Result := t.Sub(M);
+        t.Free;
+      end;
+    end;
+  finally
+    a.Free;
+    bm.Free;
   end;
 end;
 
 function TBN.ModMul(const B, M: TBN): TBN;
+var
+  p: TBN;
 begin
   if M.IsZero then
     raise EBNError.Create('TBN.ModMul: M = 0');
-  Result := Mul(B).Modulo(M);
+  p := Mul(B);
+  Result := p.Modulo(M);
+  p.Free;
 end;
 
 function TBN.ModPow(const E, M: TBN): TBN;
 var
-  acc, base: TBN;
+  acc, base, tmp: TBN;
   i: LongInt;
 begin
   if M.IsZero then
@@ -845,42 +865,68 @@ begin
   base := Modulo(M);
   for i := E.BitLength - 1 downto 0 do
   begin
-    acc := acc.ModMul(acc, M);
+    tmp := acc.ModMul(acc, M);
+    acc.Free;
+    acc := tmp;
     if E.BitAt(i) then
-      acc := acc.ModMul(base, M);
+    begin
+      tmp := acc.ModMul(base, M);
+      acc.Free;
+      acc := tmp;
+    end;
   end;
+  base.Free;
   Result := acc;
 end;
 
 function TBN.ModInverse(const M: TBN): TBN;
 var
-  t, newt, tmpT: TSignedBN;
-  r, newr, q, rem, a: TBN;
+  t, newt, tmpT, qs, prod, msb: TSignedBN;
+  r, newr, q, rem, one: TBN;
 begin
   if M.IsZero then
     raise EBNError.Create('TBN.ModInverse: M = 0');
-  a := Modulo(M);
   t := SBFromInt(0);
   newt := SBFromInt(1);
   r := M.Clone;
-  newr := a;
+  newr := Modulo(M);
   while not newr.IsZero do
   begin
     rem := r.Divide(newr, q); { q = r div newr, rem = r mod newr }
-    tmpT := SBSub(t, SBMul(SBFromBN(q), newt));
+    qs := SBFromBN(q);
+    prod := SBMul(qs, newt);
+    tmpT := SBSub(t, prod);
+    prod.Mag.Free;
+    {t <- newt; the previous t is no longer referenced.}
+    t.Mag.Free;
     t := newt;
     newt := tmpT;
+    {r <- newr; the previous r is no longer referenced.}
+    r.Free;
     r := newr;
     newr := rem;
+    q.Free;
   end;
-  if r.Compare(TBN.FromQWord(1)) <> 0 then
+  one := TBN.FromQWord(1);
+  if r.Compare(one) <> 0 then
     Result := nil {GCD > 1: no inverse element}
   else
   begin
+    msb := SBFromBN(M);
     while t.Neg do
-      t := SBAdd(t, SBFromBN(M));
+    begin
+      tmpT := SBAdd(t, msb);
+      t.Mag.Free;
+      t := tmpT;
+    end;
     Result := t.Mag;
+    t.Mag := nil; {ownership transferred to Result}
   end;
+  t.Mag.Free;
+  newt.Mag.Free;
+  r.Free;
+  newr.Free;
+  one.Free;
 end;
 
 {--- TBN: conversion ---}
@@ -916,20 +962,24 @@ function TBN.ToString: string;
 const
   Base: QWord = 10;
 var
-  n, q: TBN;
-  rem: TBN;
+  n, q, rem, Divisor: TBN;
   s: string;
 begin
   if IsZero then
     Exit('0');
+  Divisor := TBN.CreateFromQWord(Base);
   n := Clone;
   s := '';
   while not n.IsZero do
   begin
-    rem := n.Divide(TBN.FromQWord(Base), q);
+    rem := n.Divide(Divisor, q);
     s := Chr(Ord('0') + Integer(rem.WordAt(0))) + s;
+    rem.Free;
+    n.Free;
     n := q;
   end;
+  n.Free;
+  Divisor.Free;
   Result := s;
 end;
 
