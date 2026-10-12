@@ -85,8 +85,8 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
 - **D — TLS 1.2 (12).** Client handshake and record layer; data can be
   exchanged with a real TLS server (`openssl s_server`, `stunnel` or a mock).
 - **E — integration (14–16).** A complete HTTPS client works without system
-  OpenSSL; end-to-end tests run against a local server.
-- **F — TLS 1.3 (13).** Optional extension after milestone E.
+  OpenSSL; end-to-end tests run against a local server. **Done.**
+- **F — TLS 1.3 (13).** Optional extension after milestone E. Pending.
 
 ## Risks
 

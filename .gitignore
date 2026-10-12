@@ -25,6 +25,13 @@ id_*
 # Downloaded locally, not part of the repository.
 OpenSSL/
 
+# Local reference copies of FPC/FCL units used while implementing the socket
+# handler (sslsockets.pp, opensslsockets.pp, ssockets.pp). Not built or shipped.
+docs/reference/
+
+# Local agent configuration (may contain API keys). Never committed.
+.subag/
+
 # Editors / OS noise
 .DS_Store
 *.bak

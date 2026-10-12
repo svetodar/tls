@@ -1,5 +1,7 @@
 # task 15 — OpenSSL-free HTTPS client integration
 
+Status: done (examples/https_client.pas, `make example`, `make check-no-openssl`).
+
 Layer 4. Dependencies: 14 (TLS socket).
 
 ## Goal

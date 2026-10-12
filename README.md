@@ -17,15 +17,17 @@ The library targets **FPC 3.2.2** and is written in plain Object Pascal
 | B | asymmetric crypto: RSA, EC (P-256/P-384), DH | done |
 | C | certificates: ASN.1/DER, X.509, chain verification | done |
 | D | TLS 1.2 client (record layer, handshake, AEAD suites) | done |
-| E | integration: TLS socket layer, drop-in replacement for OpenSSL | pending |
+| E | integration: TLS socket layer, drop-in replacement for OpenSSL | done |
 | F | TLS 1.3 client | pending |
 
 TLS 1.2 currently interoperates end to end with a real TLS server
 (`openssl s_server`, ECDHE-RSA and ECDHE-ECDSA suites, AES-GCM and
-ChaCha20-Poly1305). Server-side TLS, renegotiation, TLS 1.0/1.1, CBC suites
-and static-RSA key exchange are intentionally out of scope.
+ChaCha20-Poly1305); a complete HTTPS client can be built on top of it
+without system OpenSSL (see `examples/https_client.pas`). Server-side TLS,
+renegotiation, TLS 1.0/1.1, CBC suites and static-RSA key exchange are
+intentionally out of scope.
 
-Test suite: **`make test` → 248 tests, 0 errors, 0 failures** (Linux, FPC 3.2.2).
+Test suite: **`make test` → 258 tests, 0 errors, 0 failures** (Linux, FPC 3.2.2).
 
 ## Requirements
 
@@ -42,6 +44,8 @@ Test suite: **`make test` → 248 tests, 0 errors, 0 failures** (Linux, FPC 3.2.
 make            # build the test runner and run the unit tests
 make build      # build bin/testrunner only
 make test       # run the tests
+make example    # build bin/https_client (OpenSSL-free HTTPS client)
+make check-no-openssl  # verify no library/example uses clause pulls in openssl
 ./build.sh      # same as "make test", with a gmkdir shim when needed
 make fixtures   # regenerate certificate and DER fixtures (openssl + python3)
 make clean
@@ -51,6 +55,7 @@ make clean
 
 ```
 src/              library units (tls.<area>.pas)
+examples/         example programs (https_client.pas)
 tests/            fpcunit tests, one unit per source area
 tests/fixtures/   certificates, DER vectors, fixture generator (gen_certs.sh)
 tests/tools/      standalone debugging programs (not part of the test run)
@@ -76,19 +81,55 @@ build.sh          convenience wrapper around make
 | `tls.asn1` | ASN.1/DER parser and encoder |
 | `tls.x509` | X.509 v3 certificate parsing |
 | `tls.certstore` | trust store and chain/signature verification |
-| `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts |
+| `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, high-level `TTLS12Client` |
+| `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` over a socket |
 
 The transport used by `tls.tls12` is abstract (`ITLSTransport` with
 `Read`/`Write`/`BytesAvailable`), so the protocol code never touches a socket
 directly; `TTLSStreamTransport` adapts any `TStream`, and the tests use an
 in-memory mock.
 
+## Integration (drop-in replacement for OpenSSL)
+
+A consumer that uses FPC's SSL sockets can switch to this library without
+rewriting its I/O code: `tls.tlssocket` registers `TTLSSocketHandler` as the
+default `TSSLSocketHandler` class, and exposes the same `Connect`, `Send`,
+`Recv`, `Close`, `Shutdown` and `VerifyPeerCert` surface. Certificates are
+verified by default; a trust store is configured with `TrustStorePath` (a
+PEM bundle) or by assigning a `TCertStore` to `TrustStore`.
+
+```pascal
+uses ssockets, tls.tlssocket;
+
+var
+  H: TTLSSocketHandler;
+  S: TInetSocket;
+begin
+  H := TTLSSocketHandler.Create;
+  H.VerifyPeerCert := True;
+  H.TrustStorePath := '/etc/ssl/certs/ca-certificates.crt';
+  S := TInetSocket.Create('example.com', 443, H);
+  try
+    S.Connect;                       // TCP + TLS 1.2 handshake
+    H.Send(Request[1], Length(Request));
+    N := H.Recv(Buf, SizeOf(Buf));   // decrypted application data
+  finally
+    S.Free;                          // also frees the handler
+  end;
+end;
+```
+
+The complete program is [`examples/https_client.pas`](examples/https_client.pas)
+(`make example`); `make check-no-openssl` proves that neither the library nor
+the example imports the FPC OpenSSL bindings. No system `libssl`/`libcrypto`
+is required at build or run time.
+
 ## Documentation
 
 - [`docs/plan.md`](docs/plan.md) — goal, scope, layers, milestones, risks.
 - [`docs/architecture.md`](docs/architecture.md) — unit layering and public API.
 - [`docs/tasks/`](docs/tasks/) — task specs `01-bn.md` … `16-e2e.md`
-  (one per work item; the pending ones define milestones E and F).
+  (one per work item; only the TLS 1.3 task remains pending).
 - [`docs/progress.md`](docs/progress.md) — implementation notes, verified
   vectors, FPC pitfalls.
 - [`docs/openssl-reference.md`](docs/openssl-reference.md) — how to obtain the

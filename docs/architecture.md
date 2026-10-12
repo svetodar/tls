@@ -14,7 +14,7 @@ it:
 [1] rsa, ec, dh                    (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
 [3] prf, tls12 (-> tls13 planned)  (use everything below)
-[4] socket layer and host integration (planned)
+[4] tls.tlssocket, examples        (use [3])
 ```
 
 ## Units
@@ -34,10 +34,10 @@ it:
 | `tls.x509` | X.509 v3 certificate parsing (subject/issuer, validity, SPKI, extensions). | `tls.asn1`, `tls.bn`, `tls.ec`, `tls.rsa` |
 | `tls.certstore` | Trust store, chain building and signature/validity verification. | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627). | `tls.hmac` |
-| `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
+| `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`, high-level `TTLS12Client`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
+| `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` adapter over a connected socket (`TTLSInetSocketTransport`). | `tls.tls12`, `tls.certstore`, `ssockets`, `sslsockets`, `sslbase` |
 
-Planned: `tls.tls13` (TLS 1.3 client) and `tls.tlssocket` (FPC
-`sslsockets`-compatible socket handler).
+Planned: `tls.tls13` (TLS 1.3 client).
 
 ## Transport abstraction
 
@@ -54,8 +54,12 @@ end;
 
 - `TTLSStreamTransport` adapts any `TStream` (used by the tests with an
   in-memory mock).
-- The planned `TInetSocket`-based transport and the socket handler (task 14)
-  implement the same interface, so protocol code stays testable in memory.
+- `TTLSInetSocketTransport` (in `tls.tlssocket`) adapts a connected
+  `TSocketStream`; it uses `fprecv`/`fpsend` on the file descriptor so that
+  it does not recurse through the socket's own `TSSLSocketHandler`.
+- `TTLSSocketHandler` (in `tls.tlssocket`) is the FPC
+  `sslsockets.TSSLSocketHandler`-compatible entry point used by consumers
+  (and registered as the default handler).
 
 Record and handshake limits are explicit constants (`TLSRecordMaxPayload`,
 `TLSRecordMaxCiphertext`, `TLSHandshakeMaxLength`,
@@ -92,7 +96,7 @@ human-readable `Reason` (used by tests and by the socket layer).
 - AEAD record protection: AES-GCM (RFC 5288) and ChaCha20-Poly1305
   (RFC 7905); CBC and static-RSA suites are explicitly rejected.
 
-## Data flow (HTTPS, planned)
+## Data flow (HTTPS)
 
 ```
 application HTTP client
@@ -107,6 +111,10 @@ tls.tls12  (record layer + handshake)                   [task 12]
         +--> tls.prf, tls.aes / tls.chacha20 (keys, AEAD)
         +--> tls.ec / tls.rsa / tls.dh (key exchange)
 ```
+
+The `examples/https_client.pas` program exercises this path end to end and
+`make check-no-openssl` fails if any library or example `uses` clause pulls
+in the FPC OpenSSL bindings.
 
 ## Conventions
 

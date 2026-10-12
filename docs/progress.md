@@ -12,12 +12,13 @@ them.
 | B | asymmetric crypto: RSA, EC (P-256/P-384), DH | done |
 | C | certificates: ASN.1/DER, X.509, chain verification | done |
 | D | TLS 1.2 client (record layer, handshake, AEAD suites) | done |
-| E | integration: TLS socket layer, OpenSSL-free HTTPS client | pending |
+| E | integration: TLS socket layer, OpenSSL-free HTTPS client | done |
 | F | TLS 1.3 client | pending |
 
-Test suite: `make test` → **248 tests, 0 errors, 0 failures** (Linux,
-FPC 3.2.2). The two end-to-end tests drive a real `openssl s_server` and are
-skipped when the `openssl` CLI is unavailable.
+Test suite: `make test` → **258 tests, 0 errors, 0 failures** (Linux,
+FPC 3.2.2). The end-to-end tests drive a real `openssl s_server` and are
+skipped when the `openssl` CLI is unavailable; the network-required test to
+`example.com` only runs when `TLS_TEST_NETWORK=1`.
 
 ## Verified vectors
 
@@ -45,12 +46,23 @@ skipped when the `openssl` CLI is unavailable.
   assembly, CCS, Finished/VerifyData (constant-time), alerts; end-to-end
   handshake + HTTP exchange with `openssl s_server` for
   `ECDHE-RSA-AES128-GCM-SHA256` and `ECDHE-ECDSA-AES128-GCM-SHA256`.
+  The high-level `TTLS12Client` orchestrates the handshake and the
+  application-data exchange over `ITLSTransport`.
+- **Socket layer:** `tls.tlssocket` drives a real `TInetSocket`; tests cover
+  verified connect (RSA/ECDSA), unknown-CA and host-mismatch rejection, the
+  strict no-trust-store error, verification-disabled mode, clean encrypted
+  `close_notify`, and a 100 kB multi-record response read in 512-byte chunks.
 
 ## Design notes
 
 - `tls.bn` represents `TBN` as an array of 64-bit words, little-endian by
   word, normalised (no leading zero words). `TSignedBN` (sign + magnitude)
   exists only for the extended Euclidean algorithm.
+- TBN methods return **new** objects that the caller owns; the arithmetic
+  helpers (`Modulo`, `ModAdd`, `ModSub`, `ModMul`, `ModPow`, `ModInverse`,
+  `Divide`, `ToString`) free their temporary intermediates. The EC point
+  operations free the abandoned intermediates when a result is reassigned.
+  This keeps a full handshake allocation-neutral (see the heaptrc notes).
 - The CSPRNG is an HMAC-DRBG over SHA-256; the entropy source is
   `/dev/urandom` on Unix and `BCryptGenRandom` on Windows.
 - `tls.tls12` is transport-agnostic (`ITLSTransport`); the protocol code
@@ -60,6 +72,14 @@ skipped when the `openssl` CLI is unavailable.
   (`TLS12CipherSuiteSupported`/`TLS12CheckCipherSuiteSupported`).
 - Certificate `Reason` strings use stable English keywords
   (`expired`, `issuer`, `nil`, …) that the tests assert on.
+- `tls.tlssocket` deliberately reads/writes the socket's file descriptor
+  with `fprecv`/`fpsend` instead of `TSocketStream.Read/Write`: the socket
+  owns the handler, so going through the stream would recurse into the TLS
+  handler. The handler defaults to `VerifyPeerCert = True`; without a trust
+  store `Connect` fails instead of silently accepting the certificate.
+- After the handshake, alerts (including `close_notify`) are AEAD-protected;
+  `TTLS12Client.Recv` decrypts them before decoding, so a normal close is
+  reported as EOF (0) rather than as a receive error (-1).
 
 ## FPC 3.2.2 pitfalls
 

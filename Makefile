@@ -22,6 +22,7 @@ EXEEXT := .exe
 endif
 
 TESTAPP := $(BIN)/testrunner$(EXEEXT)
+EXAMPLEAPP := $(BIN)/https_client$(EXEEXT)
 
 # -O2 -gl: optimisation plus debug information; -Fusrc: unit search path.
 FPCFLAGS := -O2 -gl -Fusrc
@@ -47,6 +48,21 @@ build: $(TESTAPP)
 test: $(TESTAPP)
 	$(TESTAPP) --all --format=plain
 
+# Build the OpenSSL-free HTTPS client example.
+example: $(EXAMPLEAPP)
+
+$(EXAMPLEAPP): $(SOURCES)
+	@$(GMKDIR) $(BUILD)/example $(BIN)
+	$(FPC) $(FPCFLAGS) -FU$(BUILD)/example -FE$(BIN) examples/https_client.pas
+
+# Fail if any library or example unit pulls in the FPC OpenSSL bindings.
+check-no-openssl:
+	@for f in $(SOURCES) examples/*.pas; do \
+	  awk '/^[ \t]*uses[ \t]/{u=1} u{print FILENAME":"FNR":"$$0} u&&/;/{u=0}' "$$f"; \
+	done | grep -iE '\b(openssl|opensslsockets|fpopenssl)\b' \
+	  && { echo "ERROR: OpenSSL unit referenced in a uses clause"; exit 1; } \
+	  || echo "OK: no OpenSSL unit references"
+
 $(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES)
 	@$(GMKDIR) $(TESTLIB) $(BIN)
 	$(FPC) $(FPCFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
@@ -61,4 +77,4 @@ clean:
 	rm -f $(SRC)/*.o $(SRC)/*.ppu $(TESTS)/*.o $(TESTS)/*.ppu
 	rm -f $(TESTS)/tools/*.o $(TESTS)/tools/*.ppu
 
-.PHONY: all build test fixtures clean
+.PHONY: all build test fixtures example check-no-openssl clean

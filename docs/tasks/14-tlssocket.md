@@ -1,5 +1,7 @@
 # task 14 — TLS socket handler (FPC `sslsockets` compatible)
 
+Status: done (src/tls.tlssocket.pas, tests/test_tlssocket.pas).
+
 Layer 4. Dependencies: 12 (TLS 1.2), optionally 13 (TLS 1.3).
 
 ## Goal
