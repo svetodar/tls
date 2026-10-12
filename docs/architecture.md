@@ -13,7 +13,7 @@ it:
 [0] bn, rand, sha2 -> hmac, aes, chacha20
 [1] rsa, ec, dh                    (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
-[3] prf, tls12 (-> tls13 planned)  (use everything below)
+[3] prf, tls12, tls13              (use everything below)
 [4] tls.tlssocket, examples        (use [3])
 ```
 
@@ -35,14 +35,13 @@ it:
 | `tls.certstore` | Trust store, chain building and signature/validity verification. | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627). | `tls.hmac` |
 | `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`, high-level `TTLS12Client`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
+| `tls.tls13` | TLS 1.3 client (RFC 8446): HKDF key schedule, AEAD-only record layer, 1-RTT handshake, `TTLS13Client`; HelloRetryRequest/0-RTT are rejected. | `tls.tls12`, `tls.sha2`, `tls.hmac`, `tls.rand`, `tls.bn`, `tls.ec`, `tls.rsa`, `tls.x509`, `tls.certstore`, `tls.aes`, `tls.chacha20` |
 | `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` adapter over a connected socket (`TTLSInetSocketTransport`). | `tls.tls12`, `tls.certstore`, `ssockets`, `sslsockets`, `sslbase` |
-
-Planned: `tls.tls13` (TLS 1.3 client).
 
 ## Transport abstraction
 
-Protocol code never talks to a socket or a file directly. `tls.tls12` reads and
-writes through `ITLSTransport`:
+Protocol code never talks to a socket or a file directly. `tls.tls12` and
+`tls.tls13` read and write through `ITLSTransport`:
 
 ```pascal
 ITLSTransport = interface
@@ -96,6 +95,40 @@ human-readable `Reason` (used by tests and by the socket layer).
 - AEAD record protection: AES-GCM (RFC 5288) and ChaCha20-Poly1305
   (RFC 7905); CBC and static-RSA suites are explicitly rejected.
 
+## TLS 1.3 client
+
+`tls.tls13` implements the client side of RFC 8446 on top of the transport and
+record plumbing of `tls.tls12`:
+
+- HKDF (RFC 5869) over HMAC-SHA256/384/512 and `HKDF-Expand-Label` with the
+  `tls13 ` prefix; the full key schedule (early/derived/handshake/master
+  secrets and the four handshake/application traffic secrets, aggregated in
+  `TTLS13KeySchedule`).
+- 1-RTT handshake: `ClientHello` with SNI, `supported_versions = 0x0304`,
+  `supported_groups`, `signature_algorithms`, `key_share` and
+  `psk_key_exchange_modes`; parsing of `ServerHello`,
+  `EncryptedExtensions`, `Certificate` (TLS 1.3 format) and
+  `CertificateVerify`; `Finished` with constant-time verify-data comparison.
+- Key exchange `key_share` on P-256/P-384 (shared secret = X coordinate of the
+  (EC)DHE point); X25519 is recognized but not offered.
+- Record layer 1.3: AEAD only (`TLS_AES_128_GCM_SHA256`,
+  `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`),
+  `nonce = iv XOR seq_num`, AAD = the record header, inner plaintext
+  `content || content_type || 0^padding`; legacy `ChangeCipherSpec` records
+  are ignored.
+- `CertificateVerify` verification with the RFC 8446 §4.4.3 content string
+  (`0x20 * 64 || context || 0x00 || Transcript-Hash`) for
+  `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384` and
+  `rsa_pss_rsae_sha256`; the chain reuses `tls.certstore`.
+- High-level `TTLS13Client` (`Connect`/`Send`/`Recv`/`Shutdown`/`Close`,
+  `HandshakeDone`, `CipherSuite`, `CertChain`, `PendingBytes`), still
+  transport-agnostic through `ITLSTransport`.
+
+Unsupported cases fail loudly with `ETLS13Error`: HelloRetryRequest is
+detected via its sentinel random and rejected, 0-RTT/early data and PSK
+resumption are not supported, and unknown suites, groups or signature
+schemes are refused.
+
 ## Data flow (HTTPS)
 
 ```
@@ -105,23 +138,26 @@ application HTTP client
 tls.tlssocket  (TSSLSocketHandler-compatible handler)   [task 14]
         |  ITLSTransport
         v
-tls.tls12  (record layer + handshake)                   [task 12]
+tls.tls12 / tls.tls13  (record layer + handshake)       [task 12, 13]
         |
         +--> tls.certstore  (verify server chain)       [task 11]
-        +--> tls.prf, tls.aes / tls.chacha20 (keys, AEAD)
+        +--> tls.prf / HKDF, tls.aes / tls.chacha20 (keys, AEAD)
         +--> tls.ec / tls.rsa / tls.dh (key exchange)
 ```
 
-The `examples/https_client.pas` program exercises this path end to end and
-`make check-no-openssl` fails if any library or example `uses` clause pulls
-in the FPC OpenSSL bindings.
+The `examples/https_client.pas` program exercises the TLS 1.2 path end to end
+(via `tls.tlssocket`) and `make check-no-openssl` fails if any library or
+example `uses` clause pulls in the FPC OpenSSL bindings. `tls.tls13` is not yet
+wired into `tls.tlssocket`; it is driven directly through `ITLSTransport` by
+`tests/test_tls13_e2e.pas` and `tests/tools/tls13_client.pas`.
 
 ## Conventions
 
 - Units are named `tls.<area>.pas`; the `tls.` prefix avoids collisions with
   RTL/FCL units.
-- Errors are typed (`EBNError`, `EASN1Error`, `EX509Error`, `ETLS12Error`, …)
-  and raised on malformed input rather than returning partial data.
+- Errors are typed (`EBNError`, `EASN1Error`, `EX509Error`, `ETLS12Error`,
+  `ETLS13Error`, …) and raised on malformed input rather than returning
+  partial data.
 - Secret-dependent comparisons are constant-time; secret material is never
   logged.
 - Randomness for keys, nonces and IVs comes from `tls.rand` only.

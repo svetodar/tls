@@ -82,12 +82,13 @@ build.sh          convenience wrapper around make
 | `tls.x509` | X.509 v3 certificate parsing |
 | `tls.certstore` | trust store and chain/signature verification |
 | `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, high-level `TTLS12Client` |
+| `tls.tls13` | TLS 1.3 client (RFC 8446): HKDF key schedule, AEAD-only record layer, 1-RTT handshake, high-level `TTLS13Client` |
 | `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` over a socket |
 
-The transport used by `tls.tls12` is abstract (`ITLSTransport` with
-`Read`/`Write`/`BytesAvailable`), so the protocol code never touches a socket
-directly; `TTLSStreamTransport` adapts any `TStream`, and the tests use an
-in-memory mock.
+The transport used by `tls.tls12` and `tls.tls13` is abstract (`ITLSTransport`
+with `Read`/`Write`/`BytesAvailable`), so the protocol code never touches a
+socket directly; `TTLSStreamTransport` adapts any `TStream`, and the tests use
+an in-memory mock.
 
 ## Integration (drop-in replacement for OpenSSL)
 

@@ -13,12 +13,13 @@ them.
 | C | certificates: ASN.1/DER, X.509, chain verification | done |
 | D | TLS 1.2 client (record layer, handshake, AEAD suites) | done |
 | E | integration: TLS socket layer, OpenSSL-free HTTPS client | done |
-| F | TLS 1.3 client | pending |
+| F | TLS 1.3 client (RFC 8446, 1-RTT, HKDF, AEAD-only) | done |
 
-Test suite: `make test` → **258 tests, 0 errors, 0 failures** (Linux,
-FPC 3.2.2). The end-to-end tests drive a real `openssl s_server` and are
-skipped when the `openssl` CLI is unavailable; the network-required test to
-`example.com` only runs when `TLS_TEST_NETWORK=1`.
+Test suite: `make test` → **301 tests, 0 errors, 0 failures** (Linux,
+FPC 3.2.2); `make check-no-openssl` → no OpenSSL unit references. The
+end-to-end tests drive a real `openssl s_server` and are skipped when the
+`openssl` CLI is unavailable; the network-required test to `example.com` only
+runs when `TLS_TEST_NETWORK=1`.
 
 ## Verified vectors
 
@@ -52,6 +53,21 @@ skipped when the `openssl` CLI is unavailable; the network-required test to
   verified connect (RSA/ECDSA), unknown-CA and host-mismatch rejection, the
   strict no-trust-store error, verification-disabled mode, clean encrypted
   `close_notify`, and a 100 kB multi-record response read in 512-byte chunks.
+- **TLS 1.3:** HKDF-Extract/Expand against RFC 5869 A.1–A.3 (SHA-256) plus
+  independent SHA-384 vectors; `HkdfLabel` serialization and
+  `HKDF-Expand-Label` against python3/`openssl kdf` references. The complete
+  SHA-256 key schedule (early, derived, handshake, c/s handshake, master and
+  the four traffic secrets) matches the RFC 8448 §3 trace and the RFC 8448
+  PSK early secret; SHA-384 was checked against the same independent
+  reference. Record layer: `nonce = iv XOR seq_num`, AAD and
+  inner-plaintext round-trips (including padding and malformed cases), the
+  RFC 8448 AES-128-GCM client-Finished and application-data vectors, and
+  published vectors for all three suites. Handshake parsers are covered for
+  valid input and for explicit rejection (HelloRetryRequest sentinel random,
+  unknown/TLS 1.2 cipher suite, malformed bodies, bad `CertificateVerify`).
+  End-to-end handshake + HTTP GET against `openssl s_server -tls1_3` for
+  `TLS_AES_128_GCM_SHA256` over P-256 with RSA and ECDSA certificates and for
+  `TLS_AES_256_GCM_SHA384` over P-384.
 
 ## Design notes
 
@@ -80,11 +96,28 @@ skipped when the `openssl` CLI is unavailable; the network-required test to
 - After the handshake, alerts (including `close_notify`) are AEAD-protected;
   `TTLS12Client.Recv` decrypts them before decoding, so a normal close is
   reported as EOF (0) rather than as a receive error (-1).
+- TLS 1.3 lives in `tls.tls13` on the same layer as `tls.tls12` and reuses
+  its `ITLSTransport`, the SNI extension encoder and `TTLS12CertChain` /
+  `TCertStore` for verification. HKDF and every 1.3-only derivation stay in
+  `tls.tls13`; `tls.prf` remains strictly TLS 1.2. Like the 1.2 client,
+  `TTLS13Client` never touches a socket, so it is testable in memory.
+- The 1.3 record layer is AEAD-only: `nonce = iv XOR (zero-padded big-endian
+  sequence number)` and the AAD is the five-byte record header; the inner
+  plaintext is `content || content_type || 0^padding`. Legacy
+  `ChangeCipherSpec` records and post-handshake `NewSessionTicket` are
+  ignored; `KeyUpdate` is rejected.
+- HelloRetryRequest is detected by the RFC 8446 §4.1.3 sentinel random and
+  rejected with an explicit `ETLS13Error` (no silent second ClientHello).
+  0-RTT/PSK resumption, client certificates and X25519 are not implemented;
+  `key_share` offers P-256 and P-384 only.
+- `ETLS13Error` derives from `ETLS12Error`, so callers may keep catching the
+  TLS 1.2 type; every unsupported or malformed input raises it instead of a
+  bare `Exception`.
 
 ## FPC 3.2.2 pitfalls
 
 - `+` is not overloaded for `TBytes` — use a helper such as
-  `ASN1_BytesConcat`.
+  `ASN1_BytesConcat` (`tls.tls13` carries its own local `BytesConcat`).
 - There is no `System.HexToBytes`; the tests carry a local hex decoder.
 - A class property named `Length` shadows the global `Length()` inside that
   class — name such properties differently (`DataLength`).

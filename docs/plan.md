@@ -39,7 +39,7 @@ Layers, bottom-up; each layer depends only on the ones below it:
 [0] bn, rand, sha2 -> hmac, aes, chacha20
 [1] rsa, ec, dh                    (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
-[3] prf, tls12 (-> tls13 planned)  (use everything below)
+[3] prf, tls12, tls13              (use everything below)
 [4] socket layer and host integration (planned)
 ```
 
@@ -86,7 +86,10 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
   exchanged with a real TLS server (`openssl s_server`, `stunnel` or a mock).
 - **E — integration (14–16).** A complete HTTPS client works without system
   OpenSSL; end-to-end tests run against a local server. **Done.**
-- **F — TLS 1.3 (13).** Optional extension after milestone E. Pending.
+- **F — TLS 1.3 (13).** Optional extension after milestone E: client-side
+  TLS 1.3 with updated 1-RTT handshake, HKDF key schedule, AEAD record layer;
+  data can be exchanged with a real TLS 1.3 server (`openssl s_server
+  -tls1_3`). **Done** (2026-10-12).
 
 ## Risks
 
