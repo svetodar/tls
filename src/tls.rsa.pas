@@ -51,8 +51,8 @@ function PKCS1v15Encode(const Digest: TBytes; const Oid: string; ModLen: LongInt
 function PKCS1v15Decode(const AEM: TBN; const Oid: string; ModLen: LongInt; CheckOID: Boolean = True): TBytes;
 function PKCS1v15EncryptEncode(const AMessage: TBytes; ModLen: LongInt): TBN;
 function PKCS1v15DecryptDecode(const AEM: TBN; ModLen: LongInt): TBytes;
-function PSSEncode(const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModLen: LongInt): TBN;
-function PSSVerify(const AEM: TBN; const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModLen: LongInt): Boolean;
+function PSSEncode(const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModBits: LongInt): TBN;
+function PSSVerify(const AEM: TBN; const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModBits: LongInt): Boolean;
 
 implementation
 
@@ -347,9 +347,12 @@ begin
     Result[i] := em[sep + 1 + i];
 end;
 
-{EMSA-PSS-ENCODE (RFC 8017, §9.1.1). Digest — already computed mHash.
-  emBits = ModLen*8 - 1 (modulus — product of two primes). }
-function PSSEncode(const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModLen: LongInt): TBN;
+{EMSA-PSS-ENCODE (RFC 8017, 9.1.1). Digest — already computed mHash.
+  ModBits is the bit length of the RSA modulus; emBits = ModBits - 1 and
+  emLen = ceil(emBits / 8). A 1023-bit modulus (common when p and q are
+  both 512 bits) has emLen = 128 but only 1022 significant bits, so the
+  byte length alone is not enough. }
+function PSSEncode(const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModBits: LongInt): TBN;
 var
   hLen, emLen, emBits, emPs, dbLen, extra: LongInt;
   salt, mprime, h, db, mask, maskedDb, em: TBytes;
@@ -358,8 +361,8 @@ begin
   hLen := Length(Digest);
   if SaltLen < 0 then
     SaltLen := hLen;
-  emLen := ModLen;
-  emBits := ModLen * 8 - 1;
+  emBits := ModBits - 1;
+  emLen := (emBits + 7) div 8;
   if emLen < hLen + SaltLen + 2 then
     raise Exception.Create('PSS: modulus too small');
   dbLen := emLen - hLen - 1;
@@ -390,8 +393,8 @@ begin
   for i := 0 to dbLen - 1 do
     maskedDb[i] := Byte(db[i] xor mask[i]);
 
-  {Clear the high bits that do not fit in emBits (leftmost emLen*8-emBits). }
-  extra := ModLen * 8 - emBits;
+  {Clear the high bits that do not fit in emBits.}
+  extra := emLen * 8 - emBits;
   if extra > 0 then
     maskedDb[0] := maskedDb[0] and Byte($FF shr extra);
 
@@ -404,8 +407,9 @@ begin
   Result := TBN.FromBytes(em, True);
 end;
 
-{EMSA-PSS-VERIFY (RFC 8017, §9.1.2). Digest — already computed mHash. }
-function PSSVerify(const AEM: TBN; const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModLen: LongInt): Boolean;
+{EMSA-PSS-VERIFY (RFC 8017, 9.1.2). Digest — already computed mHash.
+  ModBits is the bit length of the RSA modulus (see PSSEncode). }
+function PSSVerify(const AEM: TBN; const Digest: TBytes; const Oid: string; SaltLen: LongInt; ModBits: LongInt): Boolean;
 var
   em, saved, h, h2, db, maskedDb, mask, mprime, salt: TBytes;
   hLen, emLen, emBits, emPs, dbLen, extra, origLen, i: LongInt;
@@ -415,8 +419,8 @@ begin
   hLen := Length(Digest);
   if SaltLen < 0 then
     SaltLen := hLen;
-  emLen := ModLen;
-  emBits := ModLen * 8 - 1;
+  emBits := ModBits - 1;
+  emLen := (emBits + 7) div 8;
   if emLen < hLen + SaltLen + 2 then
     Exit;
   dbLen := emLen - hLen - 1;
@@ -442,7 +446,7 @@ begin
     Exit;
 
   {4. The leftmost bits of maskedDB must be zero. }
-  extra := ModLen * 8 - emBits;
+  extra := emLen * 8 - emBits;
   if extra > 0 then
     if (em[0] and Byte($FF shl (8 - extra))) <> 0 then
       Exit;
@@ -620,11 +624,9 @@ end;
 function TRSAKey.VerifyPSS(const Signature: TBN; const Hash: TBytes; SaltLen: Integer = -1): Boolean;
 var
   m: TBN;
-  modLen: LongInt;
 begin
-  modLen := (FN.BitLength + 7) div 8;
   m := Signature.ModPow(FE, FN);
-  Result := PSSVerify(m, Hash, '1.2.840.113549.1.1.11', SaltLen, modLen);
+  Result := PSSVerify(m, Hash, '1.2.840.113549.1.1.11', SaltLen, FN.BitLength);
 end;
 
 function TRSAKey.EncryptPKCS1v15(const AMessage: TBytes): TBN;
@@ -750,11 +752,9 @@ end;
 
 function TRSAKey.SignPSS(const Hash: TBytes; SaltLen: Integer = -1): TBN;
 var
-  modLen: LongInt;
   em: TBN;
 begin
-  modLen := (FN.BitLength + 7) div 8;
-  em := PSSEncode(Hash, '1.2.840.113549.1.1.11', SaltLen, modLen);
+  em := PSSEncode(Hash, '1.2.840.113549.1.1.11', SaltLen, FN.BitLength);
   Result := PrivateDecrypt(em);
 end;
 

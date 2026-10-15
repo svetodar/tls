@@ -19,6 +19,7 @@ type
     procedure TestPKCS1v15SignVerify;
     procedure TestPKCS1v15Tampered;
     procedure TestPSSSignVerify;
+    procedure TestPSSModBitsBoundary;
     procedure TestPSSTampered;
     procedure TestOidToDerBytes;
     procedure TestPKCS1v15EncodeDecode;
@@ -126,6 +127,41 @@ begin
       'PSS: valid signature verifies');
   finally
     key.Free;
+  end;
+end;
+
+procedure TRSATests.TestPSSModBitsBoundary;
+const
+  OID = '1.2.840.113549.1.1.11';
+var
+  hash, em: TBytes;
+  value: TBN;
+  i: Integer;
+  top: Byte;
+begin
+  { Regression: RFC 8017 sets emBits = modBits - 1 and
+    emLen = ceil(emBits / 8); the number of high bits to clear is
+    8*emLen - emBits. For a 1023-bit modulus emLen is 128 but only 1022
+    bits are significant, so the top two bits of EM must be zero. The old
+    code derived emBits from the byte length (emLen*8 - 1), cleared only
+    the top bit, and could produce EM >= n, which made a valid PSS
+    signature fail to verify. }
+  hash := SHA256Str('pss modbits');
+  for i := 1 to 64 do
+  begin
+    value := PSSEncode(hash, OID, 32, 1023);
+    try
+      em := value.ToBytes(True);
+      if Length(em) < 128 then
+        top := 0
+      else
+        top := em[0];
+      Check((top and $C0) = 0, 'PSS 1023-bit: top two EM bits cleared');
+      Check(PSSVerify(value, hash, OID, 32, 1023),
+        'PSS 1023-bit round-trip');
+    finally
+      value.Free;
+    end;
   end;
 end;
 
