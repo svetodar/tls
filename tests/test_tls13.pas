@@ -248,12 +248,14 @@ var
   Groups: TTLSNamedGroups;
 begin
   Groups := TLS13DefaultSupportedGroups;
-  AssertEquals('two default groups', 2, Length(Groups));
-  AssertEquals('group[0]', TLS13GroupSecp256r1, Groups[0]);
-  AssertEquals('group[1]', TLS13GroupSecp384r1, Groups[1]);
+  AssertEquals('three default groups', 3, Length(Groups));
+  AssertEquals('group[0]', TLS13GroupX25519, Groups[0]);
+  AssertEquals('group[1]', TLS13GroupSecp256r1, Groups[1]);
+  AssertEquals('group[2]', TLS13GroupSecp384r1, Groups[2]);
+  AssertTrue('X25519 supported', TLS13GroupSupported(TLS13GroupX25519));
   AssertTrue('P-256 supported', TLS13GroupSupported(TLS13GroupSecp256r1));
   AssertTrue('P-384 supported', TLS13GroupSupported(TLS13GroupSecp384r1));
-  AssertFalse('X25519 rejected', TLS13GroupSupported(TLS13GroupX25519));
+  AssertFalse('secp521r1 rejected', TLS13GroupSupported(25));
 end;
 
 procedure TTLS13Tests.TestSignatureSchemeSupport;
@@ -1397,11 +1399,11 @@ begin
       '000e' + '00' + '000b' + '6578616d706c652e636f6d',
       BytesToHex(Ext.Data));
 
-    { supported_groups: only the two usable NIST curves (4.2.7). }
+    { supported_groups: X25519 and the two usable NIST curves (4.2.7). }
     AssertTrue('supported_groups present',
       FindTLSExtension(Exts, TLS13ExtSupportedGroups, Ext));
-    AssertEquals('supported_groups = P-256, P-384', '000400170018',
-      BytesToHex(Ext.Data));
+    AssertEquals('supported_groups = X25519, P-256, P-384',
+      '0006001d00170018', BytesToHex(Ext.Data));
 
     { signature_algorithms: exactly the verifiable schemes (4.2.3). }
     AssertTrue('signature_algorithms present',
@@ -1415,20 +1417,24 @@ begin
     AssertEquals('supported_versions = 0x0304', '020304',
       BytesToHex(Ext.Data));
 
-    { key_share: one offer per group, uncompressed SEC 1 points (4.2.8). }
+    { key_share: one offer per group, the 32-byte X25519 value and
+      uncompressed SEC 1 points (4.2.8). }
     AssertTrue('key_share present',
       FindTLSExtension(Exts, TLS13ExtKeyShare, Ext));
-    AssertEquals('client_shares length', 2 + 69 + 101, Length(Ext.Data));
-    AssertEquals('client_shares total length field', 69 + 101,
+    AssertEquals('client_shares length', 2 + 36 + 69 + 101, Length(Ext.Data));
+    AssertEquals('client_shares total length field', 36 + 69 + 101,
       ReadU16(Ext.Data, 0));
-    Entry := TLS13ParseKeyShareEntry(Copy(Ext.Data, 2, 69));
-    AssertEquals('offer[0] group', TLS13GroupSecp256r1, Entry.Group);
-    AssertEquals('offer[0] point length', 65, Length(Entry.KeyExchange));
-    AssertEquals('offer[0] uncompressed point', $04, Entry.KeyExchange[0]);
-    Entry := TLS13ParseKeyShareEntry(Copy(Ext.Data, 71, 101));
-    AssertEquals('offer[1] group', TLS13GroupSecp384r1, Entry.Group);
-    AssertEquals('offer[1] point length', 97, Length(Entry.KeyExchange));
+    Entry := TLS13ParseKeyShareEntry(Copy(Ext.Data, 2, 36));
+    AssertEquals('offer[0] group', TLS13GroupX25519, Entry.Group);
+    AssertEquals('offer[0] key length', 32, Length(Entry.KeyExchange));
+    Entry := TLS13ParseKeyShareEntry(Copy(Ext.Data, 38, 69));
+    AssertEquals('offer[1] group', TLS13GroupSecp256r1, Entry.Group);
+    AssertEquals('offer[1] point length', 65, Length(Entry.KeyExchange));
     AssertEquals('offer[1] uncompressed point', $04, Entry.KeyExchange[0]);
+    Entry := TLS13ParseKeyShareEntry(Copy(Ext.Data, 107, 101));
+    AssertEquals('offer[2] group', TLS13GroupSecp384r1, Entry.Group);
+    AssertEquals('offer[2] point length', 97, Length(Entry.KeyExchange));
+    AssertEquals('offer[2] uncompressed point', $04, Entry.KeyExchange[0]);
 
     { The full message is htClientHello || uint24 length || body. }
     Msg := BuildTLS13ClientHello(Opts);
@@ -1485,12 +1491,12 @@ begin
       Opts2 := Opts;
       SetLength(Opts2.SupportedGroups, 2);
       Opts2.SupportedGroups[0] := TLS13GroupSecp256r1;
-      Opts2.SupportedGroups[1] := TLS13GroupX25519;
+      Opts2.SupportedGroups[1] := 25;   { secp521r1, not implemented }
       Body := BuildTLS13ClientHelloBody(Opts2);
     except
       on E: ETLS13Error do Raised := True;
     end;
-    AssertTrue('X25519 in supported_groups rejected', Raised);
+    AssertTrue('unsupported group in supported_groups rejected', Raised);
 
     Raised := False;
     try
@@ -1865,13 +1871,11 @@ begin
   end;
   AssertTrue('missing key_share rejected', Raised);
 
-  { key_share on a named group this client cannot use (X25519). }
+  { key_share on a named group this client cannot use (secp521r1). }
   SetLength(Exts, 2);
   Exts[0] := SimpleExt(TLS13ExtSupportedVersions, W16(TLS13Version));
   Exts[1] := SimpleExt(TLS13ExtKeyShare,
-    TLS13EncodeKeyShareEntry(TLS13GroupX25519,
-      HexToBytes('000102030405060708090a0b0c0d0e0f'
-               + '101112131415161718191a1b1c1d1e1f')));
+    TLS13EncodeKeyShareEntry(25, HexToBytes('04')));
   Raised := False;
   try
     SH := ParseTLS13ServerHello(BuildServerHelloBodyRaw(Rand, Sess,
@@ -1879,7 +1883,7 @@ begin
   except
     on E: ETLS13Error do Raised := True;
   end;
-  AssertTrue('X25519 key_share rejected', Raised);
+  AssertTrue('unsupported key_share group rejected', Raised);
 
   { A duplicated extension (RFC 8446, 4.2). }
   SetLength(Exts, 3);

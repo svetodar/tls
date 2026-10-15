@@ -11,7 +11,7 @@ it:
 
 ```
 [0] bn, rand, sha2 -> hmac, aes, chacha20
-[1] rsa, ec, dh                    (use [0])
+[1] rsa, ec, x25519, dh            (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
 [3] prf, tls12, tls13              (use everything below)
 [4] tls.tlssocket, examples        (use [3])
@@ -29,13 +29,14 @@ it:
 | `tls.chacha20` | ChaCha20, Poly1305 and the ChaCha20-Poly1305 AEAD (RFC 8439). | — |
 | `tls.rsa` | RSA key parsing/generation; PKCS#1 v1.5 and PSS signatures; RSAES-PKCS1-v1_5. | `tls.bn`, `tls.rand`, `tls.sha2` |
 | `tls.ec` | NIST P-256/P-384: point arithmetic, ECDH, ECDSA. | `tls.bn`, `tls.rand`, `tls.sha2` |
+| `tls.x25519` | X25519 (Curve25519 Diffie–Hellman, RFC 7748): constant-structure Montgomery ladder over GF(2^255−19) in radix 2^51. | `tls.rand` |
 | `tls.dh` | Finite-field Diffie-Hellman (DHE), standard groups. | `tls.bn`, `tls.rand` |
 | `tls.asn1` | ASN.1/DER parser and encoder. | — |
 | `tls.x509` | X.509 v3 certificate parsing (subject/issuer, validity, SPKI, extensions). | `tls.asn1`, `tls.bn`, `tls.ec`, `tls.rsa` |
 | `tls.certstore` | Trust store, chain building and signature/validity verification. | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627). | `tls.hmac` |
 | `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`, high-level `TTLS12Client`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
-| `tls.tls13` | TLS 1.3 client (RFC 8446): HKDF key schedule, AEAD-only record layer, 1-RTT handshake, `TTLS13Client`; HelloRetryRequest/0-RTT are rejected. | `tls.tls12`, `tls.sha2`, `tls.hmac`, `tls.rand`, `tls.bn`, `tls.ec`, `tls.rsa`, `tls.x509`, `tls.certstore`, `tls.aes`, `tls.chacha20` |
+| `tls.tls13` | TLS 1.3 client (RFC 8446): HKDF key schedule, AEAD-only record layer, 1-RTT handshake, `TTLS13Client`; HelloRetryRequest/0-RTT are rejected. | `tls.tls12`, `tls.sha2`, `tls.hmac`, `tls.rand`, `tls.bn`, `tls.ec`, `tls.x25519`, `tls.rsa`, `tls.x509`, `tls.certstore`, `tls.aes`, `tls.chacha20` |
 | `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` adapter over a connected socket (`TTLSInetSocketTransport`). | `tls.tls12`, `tls.certstore`, `ssockets`, `sslsockets`, `sslbase` |
 
 ## Transport abstraction
@@ -109,8 +110,8 @@ record plumbing of `tls.tls12`:
   `psk_key_exchange_modes`; parsing of `ServerHello`,
   `EncryptedExtensions`, `Certificate` (TLS 1.3 format) and
   `CertificateVerify`; `Finished` with constant-time verify-data comparison.
-- Key exchange `key_share` on P-256/P-384 (shared secret = X coordinate of the
-  (EC)DHE point); X25519 is recognized but not offered.
+- Key exchange `key_share` on X25519 (`tls.x25519`), P-256 and P-384
+  (shared secret = X coordinate of the (EC)DHE point).
 - Record layer 1.3: AEAD only (`TLS_AES_128_GCM_SHA256`,
   `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`),
   `nonce = iv XOR seq_num`, AAD = the record header, inner plaintext
@@ -143,6 +144,12 @@ tls.tls12 / tls.tls13  (record layer + handshake)       [task 12, 13]
         +--> tls.certstore  (verify server chain)       [task 11]
         +--> tls.prf / HKDF, tls.aes / tls.chacha20 (keys, AEAD)
         +--> tls.ec / tls.rsa / tls.dh (key exchange)
+
+tls.tls13  (HKDF + 1-RTT handshake)                    [task 13]
+        |  reuses tls.tls12's ITLSTransport, record/handshake primitives
+        |  and certificate chain
+        +--> tls.x25519 / tls.ec (key_share)
+        +--> tls.aes / tls.chacha20 (AEAD record protection)
 ```
 
 The `examples/https_client.pas` program exercises the TLS 1.2 path end to end

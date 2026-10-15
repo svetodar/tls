@@ -19,7 +19,8 @@ In scope:
 1. **Primitives (layer 0):** arbitrary-precision integers (BN), a CSPRNG,
    SHA-256/384/512 + HMAC, AES (CBC, GCM), ChaCha20-Poly1305, and the TLS PRF.
 2. **Asymmetric crypto (layer 1):** RSA (PKCS#1 v1.5, PSS, RSAES),
-   EC (NIST P-256/P-384, ECDHE, ECDSA), finite-field DH (DHE).
+   EC (NIST P-256/P-384, ECDHE, ECDSA), X25519 (Curve25519), finite-field
+   DH (DHE).
 3. **Certificates (layer 2):** ASN.1/DER parser, X.509 v3 parsing, trust
    store and chain/signature/validity verification.
 4. **TLS (layer 3):** a TLS 1.2 client (record layer, handshake, AEAD cipher
@@ -37,7 +38,7 @@ Layers, bottom-up; each layer depends only on the ones below it:
 
 ```
 [0] bn, rand, sha2 -> hmac, aes, chacha20
-[1] rsa, ec, dh                    (use [0])
+[1] rsa, ec, x25519, dh            (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
 [3] prf, tls12, tls13              (use everything below)
 [4] socket layer and host integration (planned)
@@ -73,6 +74,7 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
 | 14 | `14-tlssocket.md` | 4 | 12 (13) |
 | 15 | `15-http.md` | 4 | 14 |
 | 16 | `16-e2e.md` | 4 | 15 |
+| 17 | `17-x25519.md` | 1 | 01, 02 |
 
 ## Milestones
 
@@ -85,11 +87,13 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
 - **D — TLS 1.2 (12).** Client handshake and record layer; data can be
   exchanged with a real TLS server (`openssl s_server`, `stunnel` or a mock).
 - **E — integration (14–16).** A complete HTTPS client works without system
+- **E — integration (14–16).** A complete HTTPS client works without system
   OpenSSL; end-to-end tests run against a local server. **Done.**
-- **F — TLS 1.3 (13).** Optional extension after milestone E: client-side
-  TLS 1.3 with updated 1-RTT handshake, HKDF key schedule, AEAD record layer;
-  data can be exchanged with a real TLS 1.3 server (`openssl s_server
-  -tls1_3`). **Done** (2026-10-12).
+- **F — TLS 1.3 (13, 17).** Client-side TLS 1.3 with the 1-RTT handshake,
+  HKDF key schedule, AEAD record layer and the X25519, secp256r1 and
+  secp384r1 groups; interoperates with `openssl s_server -tls1_3` (all
+  three mandatory cipher suites). **Done** (2026-10-12; X25519 added in the
+  wip merge, 2026-10-16).
 
 ## Risks
 

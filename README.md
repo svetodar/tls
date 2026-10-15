@@ -14,20 +14,26 @@ The library targets **FPC 3.2.2** and is written in plain Object Pascal
 | Milestone | Scope | State |
 | --- | --- | --- |
 | A | primitives: BN, CSPRNG, SHA-2/HMAC, AES, ChaCha20-Poly1305 | done |
-| B | asymmetric crypto: RSA, EC (P-256/P-384), DH | done |
+| B | asymmetric crypto: RSA, EC (P-256/P-384), X25519, DH | done |
 | C | certificates: ASN.1/DER, X.509, chain verification | done |
 | D | TLS 1.2 client (record layer, handshake, AEAD suites) | done |
 | E | integration: TLS socket layer, drop-in replacement for OpenSSL | done |
-| F | TLS 1.3 client | pending |
+| F | TLS 1.3 client (1-RTT, AEAD, HKDF, X25519) | done |
 
-TLS 1.2 currently interoperates end to end with a real TLS server
-(`openssl s_server`, ECDHE-RSA and ECDHE-ECDSA suites, AES-GCM and
-ChaCha20-Poly1305); a complete HTTPS client can be built on top of it
-without system OpenSSL (see `examples/https_client.pas`). Server-side TLS,
+TLS 1.2 and TLS 1.3 currently interoperate end to end with a real TLS
+server (`openssl s_server`): TLS 1.2 with ECDHE-RSA and ECDHE-ECDSA suites
+(AES-GCM and ChaCha20-Poly1305), TLS 1.3 with `TLS_AES_128_GCM_SHA256`,
+`TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256` (ECDSA or
+RSA-PSS CertificateVerify), with the X25519, secp256r1 and secp384r1
+groups. A complete HTTPS client can be built on top of the library without
+system OpenSSL (see `examples/https_client.pas`). Server-side TLS,
 renegotiation, TLS 1.0/1.1, CBC suites and static-RSA key exchange are
-intentionally out of scope.
+intentionally out of scope. TLS 1.3 does not implement 0-RTT/PSK
+resumption, HelloRetryRequest or KeyUpdate.
 
-Test suite: **`make test` → 258 tests, 0 errors, 0 failures** (Linux, FPC 3.2.2).
+Test suite: **`make test` → 316 tests, 0 errors, 0 failures** (Linux, FPC
+3.2.2; the end-to-end tests are skipped when the `openssl` CLI or the
+regenerated certificate keys are unavailable).
 
 ## Requirements
 
@@ -76,6 +82,7 @@ build.sh          convenience wrapper around make
 | `tls.chacha20` | ChaCha20, Poly1305, AEAD ChaCha20-Poly1305 |
 | `tls.rsa` | RSA: key parsing/generation, PKCS#1 v1.5 and PSS signatures, RSAES-PKCS1-v1_5 |
 | `tls.ec` | NIST P-256/P-384: point arithmetic, ECDH, ECDSA |
+| `tls.x25519` | X25519 (Curve25519 Diffie–Hellman, RFC 7748) |
 | `tls.dh` | finite-field DH (DHE), standard groups |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627) |
 | `tls.asn1` | ASN.1/DER parser and encoder |
@@ -129,8 +136,8 @@ is required at build or run time.
 
 - [`docs/plan.md`](docs/plan.md) — goal, scope, layers, milestones, risks.
 - [`docs/architecture.md`](docs/architecture.md) — unit layering and public API.
-- [`docs/tasks/`](docs/tasks/) — task specs `01-bn.md` … `16-e2e.md`
-  (one per work item; only the TLS 1.3 task remains pending).
+- [`docs/tasks/`](docs/tasks/) — task specs `01-bn.md` … `17-x25519.md`
+  (one per work item; every task is complete).
 - [`docs/progress.md`](docs/progress.md) — implementation notes, verified
   vectors, FPC pitfalls.
 - [`docs/openssl-reference.md`](docs/openssl-reference.md) — how to obtain the
