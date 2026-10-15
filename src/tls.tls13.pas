@@ -19,7 +19,8 @@ unit tls.tls13;
       HKDF-Expand-Label / Derive-Secret (RFC 8446, 7.1);
     - TLS 1.3 constants: version 0x0304, cipher suites 0x1301/0x1302/0x1303,
       handshake message and extension codes;
-    - key_share on P-256/P-384 (shared secret = X coordinate of (EC)DHE);
+    - key_share on X25519/P-256/P-384 (shared secret = X coordinate of
+      (EC)DHE, or the raw X25519 output);
     - ClientHello with SNI, supported_versions, supported_groups, key_share
       and signature_algorithms;
     - ServerHello parsing, EncryptedExtensions, Certificate (TLS 1.3 format)
@@ -37,7 +38,7 @@ unit tls.tls13;
 interface
 
 uses
-  SysUtils, Classes, tls.bn, tls.ec, tls.rsa,
+  SysUtils, Classes, tls.bn, tls.ec, tls.x25519, tls.rsa,
   tls.sha2, tls.hmac, tls.rand, tls.x509, tls.certstore, tls.tls12;
 
 type
@@ -174,16 +175,16 @@ const
   TLS13ContentHandshake = 22;
   TLS13ContentApplicationData = 23;
 
-{--- key_share: ECDHE on P-256/P-384 (RFC 8446, 4.2.8) ------------------- }
+{--- key_share: (EC)DHE on X25519/P-256/P-384 (RFC 8446, 4.2.8) -------- }
 
 const
   { Named groups (RFC 8446, B.3.1.4 and the TLS Supported Groups registry).
-    Only the two NIST curves are implemented; X25519 is recognized so that
-    an offered or negotiated group can be rejected with a clear error
-    instead of being mistaken for another one. }
+    X25519, secp256r1 and secp384r1 are implemented; any other offer or
+    negotiation is rejected with a clear error instead of being mistaken
+    for another group. }
   TLS13GroupSecp256r1 = 23;   { 0x0017 }
   TLS13GroupSecp384r1 = 24;   { 0x0018 }
-  TLS13GroupX25519 = 29;      { 0x001D, recognized, not implemented }
+  TLS13GroupX25519 = 29;      { 0x001D }
 
 type
   { KeyShareEntry (RFC 8446, 4.2.8.1):
@@ -208,13 +209,14 @@ type
   end;
 
 { True when AGroup is a named group for which this unit can generate a
-  key_share (P-256, P-384). }
+  key_share (X25519, P-256, P-384). }
 function TLS13GroupSupported(AGroup: Word): Boolean;
 
-{ Generates an ephemeral ECDHE key pair for AGroup and serializes its
-  public key in SEC 1 uncompressed form. Raises an exception for an
-  unsupported group; on success PublicKey is non-empty and the returned
-  PrivateKey must be freed with TLS13KeyShareFree. }
+{ Generates an ephemeral (EC)DHE key pair for AGroup and serializes its
+  public key: an uncompressed SEC 1 point for P-256/P-384, or the 32-byte
+  u-coordinate for X25519. Raises an exception for an unsupported group; on
+  success PublicKey is non-empty and the returned PrivateKey must be freed
+  with TLS13KeyShareFree. }
 function TLS13KeyShareGenerate(AGroup: Word): TTLS13KeyShare;
 
 { Releases the private scalar held by AKeyShare. Safe to call on a
@@ -234,10 +236,11 @@ function TLS13EncodeKeyShare(const AKeyShare: TTLS13KeyShare): TBytes;
   key_exchange, or declares a length that does not match the buffer. }
 function TLS13ParseKeyShareEntry(const AData: TBytes): TTLS13KeyShareEntry;
 
-{ ECDHE shared secret (RFC 8446, 7.4.2): Y = d * Q_peer, the secret is the
-  X coordinate of Y encoded big-endian and padded to the field size of the
-  group (32 bytes for P-256, 48 for P-384). APeerKeyExchange is the raw
-  key_exchange value of the peer's KeyShareEntry.
+{ ECDHE shared secret (RFC 8446, 7.4.2). For P-256/P-384: Y = d * Q_peer,
+  the secret is the X coordinate of Y encoded big-endian and padded to the
+  field size of the group (32 bytes for P-256, 48 for P-384). For X25519:
+  the raw 32-byte X25519 output. APeerKeyExchange is the raw key_exchange
+  value of the peer's KeyShareEntry.
 
   The peer point is rejected unless it is an uncompressed point of exactly
   the right length that lies on the negotiated curve and the resulting
@@ -983,7 +986,8 @@ function TLS13CheckVerifyData(AHash: THashKind;
 
   Scope and limitations (RFC 8446, 1.2 and 4):
     - client side only, 1-RTT handshake, no 0-RTT / early data;
-    - no PSK resumption: only ephemeral (EC)DHE key shares on P-256/P-384;
+    - no PSK resumption: only ephemeral (EC)DHE key shares on
+      X25519/P-256/P-384;
     - no HelloRetryRequest: the sentinel ServerHello of RFC 8446, 4.1.3 is
       rejected with ETLS13Error instead of triggering a second ClientHello;
     - certificates are mandatory: the server flight must contain Certificate
@@ -1051,7 +1055,7 @@ public
   destructor Destroy; override;
   {Configuration; must be set before Connect. Empty fields keep their
     defaults: a fresh random and legacy_session_id, the three AEAD suites,
-    P-256/P-384 and one generated key share per offered group.}
+    X25519/P-256/P-384 and one generated key share per offered group.}
   property Options: TTLS13ClientHelloOptions read FOptions write FOptions;
   {Optional trust store for certificate verification (not owned by the
     client). nil disables chain verification.}
@@ -1205,7 +1209,7 @@ begin
     TLS13HkdfLabel(ALabel, AContext, ALen), ALen);
 end;
 
-{--- key_share: ECDHE on P-256/P-384 (RFC 8446, 4.2.8) ------------------- }
+{--- key_share: (EC)DHE on X25519/P-256/P-384 (RFC 8446, 4.2.8) -------- }
 
 { Maps a named group onto its NIST curve. Any other group is rejected, so
   that an unsupported offer never turns into silent misbehaviour. }
@@ -1221,11 +1225,12 @@ begin
   end;
 end;
 
-{ Field size in bytes of the curve selected by AGroup: 32 for P-256,
-  48 for P-384. }
+{ Field size in bytes of the curve selected by AGroup: 32 for P-256 and
+  X25519, 48 for P-384. }
 function TLS13GroupFieldSize(AGroup: Word): Integer;
 begin
   case AGroup of
+    TLS13GroupX25519: Result := 32;
     TLS13GroupSecp256r1: Result := 32;
     TLS13GroupSecp384r1: Result := 48;
   else
@@ -1253,17 +1258,29 @@ end;
 
 function TLS13GroupSupported(AGroup: Word): Boolean;
 begin
-  Result := (AGroup = TLS13GroupSecp256r1) or (AGroup = TLS13GroupSecp384r1);
+  Result := (AGroup = TLS13GroupX25519) or
+    (AGroup = TLS13GroupSecp256r1) or (AGroup = TLS13GroupSecp384r1);
 end;
 
 function TLS13KeyShareGenerate(AGroup: Word): TTLS13KeyShare;
 var
   Curve: TECCurve;
   Pair: TECKeypair;
+  XPair: TX25519KeyPair;
 begin
   Result.Group := AGroup;
   Result.PrivateKey := nil;
   Result.PublicKey := nil;
+  if AGroup = TLS13GroupX25519 then
+  begin
+    { Fresh ephemeral scalar per handshake; X25519GenerateKeyPair takes
+      the randomness from tls.rand through tls.x25519. The private scalar
+      is kept as a TBN so the record layout stays uniform. }
+    XPair := X25519GenerateKeyPair;
+    Result.PrivateKey := TBN.FromBytes(XPair.PrivateKey, True);
+    Result.PublicKey := XPair.PublicKey;
+    Exit;
+  end;
   Curve := TLS13GroupCurve(AGroup);
   try
     { Fresh ephemeral scalar per handshake; GenerateKeyPair takes the
@@ -1343,6 +1360,22 @@ var
 begin
   if AKeyShare.PrivateKey = nil then
     raise ETLS13Error.Create('key_share: key share has no private key');
+  if AKeyShare.Group = TLS13GroupX25519 then
+  begin
+    if Length(APeerKeyExchange) <> X25519KeySize then
+      raise ETLS13Error.CreateFmt(
+        'key_share: X25519 key_exchange must be %d bytes, got %d',
+        [X25519KeySize, Length(APeerKeyExchange)]);
+    try
+      Result := X25519SharedSecret(
+        PadLeftBytes(AKeyShare.PrivateKey.ToBytes(True), X25519KeySize),
+        APeerKeyExchange);
+    except
+      on E: Exception do
+        raise ETLS13Error.Create('key_share: X25519: ' + E.Message);
+    end;
+    Exit;
+  end;
   FieldSize := TLS13GroupFieldSize(AKeyShare.Group);
   if Length(APeerKeyExchange) <> 1 + 2 * FieldSize then
     raise ETLS13Error.CreateFmt(
@@ -1432,9 +1465,10 @@ end;
 
 function TLS13DefaultSupportedGroups: TTLSNamedGroups;
 begin
-  SetLength(Result, 2);
-  Result[0] := TLS13GroupSecp256r1;
-  Result[1] := TLS13GroupSecp384r1;
+  SetLength(Result, 3);
+  Result[0] := TLS13GroupX25519;
+  Result[1] := TLS13GroupSecp256r1;
+  Result[2] := TLS13GroupSecp384r1;
 end;
 
 function TLS13DefaultSignatureSchemes: TTLSSignatureSchemes;
@@ -1905,7 +1939,7 @@ begin
   if not TLS13GroupSupported(Result.KeyShare.Group) then
     raise ETLS13Error.CreateFmt(
       'TLS 1.3 ServerHello: server selected unsupported group %d '
-      + '(only secp256r1 and secp384r1 are supported)',
+      + '(only x25519, secp256r1 and secp384r1 are supported)',
       [Result.KeyShare.Group]);
 
   { Extensions specific to PSK / 0-RTT handshakes: this client offers

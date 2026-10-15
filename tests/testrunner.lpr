@@ -13,6 +13,7 @@ uses
   test_chacha,
   test_rsa,
   test_ec,
+  test_x25519,
   test_dh,
   test_asn1,
   test_x509,

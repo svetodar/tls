@@ -27,6 +27,7 @@ type
     { --- ClientHello via mock --- }
     procedure TestClientHelloRoundTripThroughMock;
     procedure TestClientHelloDefaultsAreSupported;
+    procedure TestDefaultGroupsAreImplemented;
 
     { --- server flight --- }
     procedure TestReadServerFlightSingleRecord;
@@ -41,6 +42,7 @@ type
     procedure TestTruncatedRecordRaises;
     procedure TestTruncatedRecordHeaderRaises;
     procedure TestOversizedPlaintextRecordRaises;
+    procedure TestOversizedCiphertextRecordAccepted;
     procedure TestOversizedCiphertextLengthRaises;
     procedure TestUnknownContentTypeRaises;
 
@@ -488,6 +490,29 @@ begin
     TLS12CipherSuiteSupported(TLSCipherRSA_AES128GCM_SHA256));
 end;
 
+{ ClientHello must not advertise a named group we cannot complete, otherwise
+  a server that prefers that group (e.g. X25519) selects it and the handshake
+  fails with 'TLS ECDHE: unsupported group'. Regression for the ECDHE
+  X25519 0x001D bug. }
+procedure TTLSTests.TestDefaultGroupsAreImplemented;
+var
+  Groups: TTLSNamedGroups;
+  i: Integer;
+  Implemented: Boolean;
+begin
+  Groups := TLS12DefaultSupportedGroups;
+  AssertTrue('default groups present', Length(Groups) > 0);
+  for i := 0 to High(Groups) do
+  begin
+    Implemented := TTLS12ECDHEClientKey.IsSupportedGroup(Groups[i]) or
+      (Groups[i] = TLSNamedGroupFFDHE2048) or
+      (Groups[i] = TLSNamedGroupFFDHE3072) or
+      (Groups[i] = TLSNamedGroupFFDHE4096);
+    AssertTrue(Format('default group 0x%.4x is implemented', [Groups[i]]),
+      Implemented);
+  end;
+end;
+
 { ==================================================================== }
 { Server flight                                                      }
 { ==================================================================== }
@@ -733,6 +758,31 @@ begin
   {Boundary: exactly 2^14 bytes is allowed (record = header + fragment).}
   AssertEquals('2^14 allowed', TLSRecordHeaderLen + TLSRecordMaxPayload,
     Length(EncodeTLSRecord(ctHandshake, SeqBytes(TLSRecordMaxPayload, 0))));
+end;
+
+procedure TTLSTests.TestOversizedCiphertextRecordAccepted;
+var
+  Frag: TBytes;
+begin
+  {An AEAD fragment may be up to 2^14+2048 bytes (RFC 5246, 6.2.3).
+    A full 2^14 plaintext plus explicit nonce and tag is a valid record.}
+  Frag := SeqBytes(TLSRecordMaxPayload + TLSAEADTagLen +
+    TLSGCMExplicitNonceLen, 0);
+  AssertEquals('2^14+24 ciphertext allowed',
+    TLSRecordHeaderLen + Length(Frag),
+    Length(EncodeTLSRecord(ctApplicationData, Frag, TLS12Version,
+      TLSRecordMaxCiphertext)));
+
+  {Above the ciphertext limit is still an error.}
+  Frag := SeqBytes(TLSRecordMaxCiphertext + 1, 0);
+  try
+    EncodeTLSRecord(ctApplicationData, Frag, TLS12Version,
+      TLSRecordMaxCiphertext);
+    AssertTrue('ciphertext > 2^14+2048 → ETLS12Error', False);
+  except
+    on E: ETLS12Error do
+      AssertTrue('ciphertext > 2^14+2048 → ETLS12Error', True);
+  end;
 end;
 
 procedure TTLSTests.TestOversizedCiphertextLengthRaises;
