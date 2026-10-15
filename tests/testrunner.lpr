@@ -13,12 +13,15 @@ uses
   test_chacha,
   test_rsa,
   test_ec,
+  test_x25519,
   test_dh,
   test_asn1,
   test_x509,
   test_certverify,
   test_tls12,
-  test_tls12_e2e;
+  test_tls12_e2e,
+  test_tls13,
+  test_tls13_e2e;
 
 var
   App: TTestRunner;

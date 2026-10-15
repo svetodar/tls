@@ -19,7 +19,8 @@ In scope:
 1. **Primitives (layer 0):** arbitrary-precision integers (BN), a CSPRNG,
    SHA-256/384/512 + HMAC, AES (CBC, GCM), ChaCha20-Poly1305, and the TLS PRF.
 2. **Asymmetric crypto (layer 1):** RSA (PKCS#1 v1.5, PSS, RSAES),
-   EC (NIST P-256/P-384, ECDHE, ECDSA), finite-field DH (DHE).
+   EC (NIST P-256/P-384, ECDHE, ECDSA), X25519 (Curve25519), finite-field
+   DH (DHE).
 3. **Certificates (layer 2):** ASN.1/DER parser, X.509 v3 parsing, trust
    store and chain/signature/validity verification.
 4. **TLS (layer 3):** a TLS 1.2 client (record layer, handshake, AEAD cipher
@@ -37,9 +38,9 @@ Layers, bottom-up; each layer depends only on the ones below it:
 
 ```
 [0] bn, rand, sha2 -> hmac, aes, chacha20
-[1] rsa, ec, dh                    (use [0])
+[1] rsa, ec, x25519, dh            (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
-[3] prf, tls12 (-> tls13 planned)  (use everything below)
+[3] prf, tls12, tls13             (use everything below)
 [4] socket layer and host integration (planned)
 ```
 
@@ -86,7 +87,9 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
   exchanged with a real TLS server (`openssl s_server`, `stunnel` or a mock).
 - **E — integration (14–16).** A complete HTTPS client works without system
   OpenSSL; end-to-end tests run against a local server.
-- **F — TLS 1.3 (13).** Optional extension after milestone E.
+- **F — TLS 1.3 (13).** Client handshake with HKDF, AEAD-only record
+  protection and certificate verification; interoperates with
+  `openssl s_server -tls1_3` (all three mandatory cipher suites).
 
 ## Risks
 

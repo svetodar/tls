@@ -11,9 +11,9 @@ it:
 
 ```
 [0] bn, rand, sha2 -> hmac, aes, chacha20
-[1] rsa, ec, dh                    (use [0])
+[1] rsa, ec, x25519, dh            (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
-[3] prf, tls12 (-> tls13 planned)  (use everything below)
+[3] prf, tls12, tls13             (use everything below)
 [4] socket layer and host integration (planned)
 ```
 
@@ -29,15 +29,16 @@ it:
 | `tls.chacha20` | ChaCha20, Poly1305 and the ChaCha20-Poly1305 AEAD (RFC 8439). | — |
 | `tls.rsa` | RSA key parsing/generation; PKCS#1 v1.5 and PSS signatures; RSAES-PKCS1-v1_5. | `tls.bn`, `tls.rand`, `tls.sha2` |
 | `tls.ec` | NIST P-256/P-384: point arithmetic, ECDH, ECDSA. | `tls.bn`, `tls.rand`, `tls.sha2` |
+| `tls.x25519` | X25519 (Curve25519 Diffie–Hellman, RFC 7748): constant-structure Montgomery ladder over GF(2^255−19) in radix 2^51. | `tls.rand` |
 | `tls.dh` | Finite-field Diffie-Hellman (DHE), standard groups. | `tls.bn`, `tls.rand` |
 | `tls.asn1` | ASN.1/DER parser and encoder. | — |
 | `tls.x509` | X.509 v3 certificate parsing (subject/issuer, validity, SPKI, extensions). | `tls.asn1`, `tls.bn`, `tls.ec`, `tls.rsa` |
 | `tls.certstore` | Trust store, chain building and signature/validity verification. | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627). | `tls.hmac` |
 | `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
+| `tls.tls13` | TLS 1.3 client: HKDF key schedule, AEAD-only record layer, 1-RTT handshake, CertificateVerify, `TTLS13Client`. | `tls.tls12`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rand`, `tls.ec`, `tls.x25519`, `tls.rsa`, `tls.bn`, `tls.x509`, `tls.certstore` |
 
-Planned: `tls.tls13` (TLS 1.3 client) and `tls.tlssocket` (FPC
-`sslsockets`-compatible socket handler).
+Planned: `tls.tlssocket` (FPC `sslsockets`-compatible socket handler).
 
 ## Transport abstraction
 
@@ -92,6 +93,35 @@ human-readable `Reason` (used by tests and by the socket layer).
 - AEAD record protection: AES-GCM (RFC 5288) and ChaCha20-Poly1305
   (RFC 7905); CBC and static-RSA suites are explicitly rejected.
 
+## TLS 1.3 client
+
+`tls.tls13` implements the client side of RFC 8446 on top of `tls.tls12`
+(which provides `ITLSTransport`, the record/handshake primitives and the
+certificate chain):
+
+- **HKDF** (RFC 5869) and `HKDF-Expand-Label` (the `tls13 ` prefix, the
+  two-byte length field and the one-byte label/context lengths);
+- **key schedule**: `Early Secret`/`Handshake Secret`/`Master Secret` and the
+  client/server handshake and application traffic secrets, plus the per-record
+  `key`/`iv` derivation;
+- **record layer**: `application_data` outer type, 5-byte AAD (outer type,
+  legacy version 0x0303, ciphertext length), sequence-number XOR nonce and an
+  inner content type that is stripped from the zero padding; AEAD only;
+- **handshake**: `ClientHello` (supported_versions, key_share, supported
+  groups, signature algorithms, psk_key_exchange_modes), encrypted server
+  flight (`EncryptedExtensions`, `Certificate`, `CertificateVerify`,
+  `Finished`) and the client `Finished`; X25519/P-256/P-384 key shares;
+- **CertificateVerify**: ECDSA P-256/P-384 and `rsa_pss_rsae_sha256` (the RSA
+  PSS implementation is SHA-256 based, so the SHA-384/512 PSS schemes are not
+  advertised);
+- `TTLS13Client`, a transport-agnostic 1-RTT client with
+  `Connect`/`SendApplicationData`/`ReceiveApplicationData`.
+
+Out of scope and rejected with a clear error where applicable: 0-RTT/early
+data, PSK resumption, `HelloRetryRequest` and post-handshake `KeyUpdate`.
+Record padding is accepted on receive (stripped from the inner plaintext) but
+never generated.
+
 ## Data flow (HTTPS, planned)
 
 ```
@@ -106,6 +136,12 @@ tls.tls12  (record layer + handshake)                   [task 12]
         +--> tls.certstore  (verify server chain)       [task 11]
         +--> tls.prf, tls.aes / tls.chacha20 (keys, AEAD)
         +--> tls.ec / tls.rsa / tls.dh (key exchange)
+
+tls.tls13  (HKDF + 1-RTT handshake)                    [task 13]
+        |  reuses tls.tls12's ITLSTransport, record/handshake primitives
+        |  and certificate chain
+        +--> tls.x25519 / tls.ec (key_share)
+        +--> tls.aes / tls.chacha20 (AEAD record protection)
 ```
 
 ## Conventions

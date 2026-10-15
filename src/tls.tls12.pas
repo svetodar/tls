@@ -563,10 +563,12 @@ function DecodeTLSRecordHeader(const AHeader: TBytes): TTLSRecordHeader;
 
 {--- Record layer: assembly and parsing of a whole record -----------------------}
 
-{Assembles a single TLS record from a fragment. A fragment longer than 2^14 bytes is an
-  error (RFC 5246, 6.2.1).}
+{Assembles a single TLS record from a fragment. AMaxLength sets the
+  allowed fragment limit: 2^14 for plaintext records (RFC 5246,
+  6.2.1) and 2^14+2048 for ciphertext records (RFC 5246, 6.2.3).}
 function EncodeTLSRecord(AContentType: TTLSContentType;
-  const AFragment: TBytes; AVersion: Word = TLS12Version): TBytes;
+  const AFragment: TBytes; AVersion: Word = TLS12Version;
+  AMaxLength: Integer = TLSRecordMaxPayload): TBytes;
 
 {Parses a single record from the buffer (header + fragment).}
 function DecodeTLSRecord(const AData: TBytes): TTLSRecord;
@@ -585,11 +587,12 @@ procedure TLSWriteAll(ATransport: ITLSTransport; const ABuffer; ACount: Integer)
   Fragment length is limited by TLSRecordMaxCiphertext.}
 function ReadTLSRecord(ATransport: ITLSTransport): TTLSRecord;
 
-{Assembles and sends a single record. A fragment longer than 2^14 bytes is
-  an error.}
+{Assembles and sends a single record. AMaxLength sets the allowed
+  fragment limit (2^14 for plaintext, 2^14+2048 for ciphertext).}
 procedure WriteTLSRecord(ATransport: ITLSTransport;
   AContentType: TTLSContentType; const AFragment: TBytes;
-  AVersion: Word = TLS12Version);
+  AVersion: Word = TLS12Version;
+  AMaxLength: Integer = TLSRecordMaxPayload);
 
 {Sends data, splitting it into records no longer than 2^14 bytes
   (RFC 5246, 6.2.1). An empty buffer produces an empty record.}
@@ -1034,15 +1037,16 @@ end;
 {--- Whole record ----------------------------------------------------- }
 
 function EncodeTLSRecord(AContentType: TTLSContentType;
-  const AFragment: TBytes; AVersion: Word): TBytes;
+  const AFragment: TBytes; AVersion: Word;
+  AMaxLength: Integer): TBytes;
 var
   Len: Integer;
 begin
   Len := Length(AFragment);
-  if Len > TLSRecordMaxPayload then
+  if Len > AMaxLength then
     raise ETLS12Error.CreateFmt(
-      'TLS record: fragment %d bytes exceeds limit 2^14 (%d)',
-      [Len, TLSRecordMaxPayload]);
+      'TLS record: fragment %d bytes exceeds limit (%d)',
+      [Len, AMaxLength]);
   Result := nil;
   SetLength(Result, TLSRecordHeaderLen + Len);
   Result[0] := TLSContentTypeToByte(AContentType);
@@ -1143,11 +1147,11 @@ end;
 
 procedure WriteTLSRecord(ATransport: ITLSTransport;
   AContentType: TTLSContentType; const AFragment: TBytes;
-  AVersion: Word);
+  AVersion: Word; AMaxLength: Integer);
 var
   Rec: TBytes;
 begin
-  Rec := EncodeTLSRecord(AContentType, AFragment, AVersion);
+  Rec := EncodeTLSRecord(AContentType, AFragment, AVersion, AMaxLength);
   TLSWriteAll(ATransport, Rec[0], Length(Rec));
 end;
 
@@ -1881,11 +1885,18 @@ begin
       'are deliberately excluded', [ASuite, TLSCipherSuiteName(ASuite)]);
 end;
 
+{ Groups advertised in the ClientHello MUST be groups the client can
+  actually complete, otherwise a server that prefers an unimplemented
+  group (typically X25519) picks it and the handshake dies with
+  'TLS ECDHE: unsupported group 0x001D'. ECDHE is implemented only for
+  P-256/P-384 (see TTLS12ECDHEClientKey.IsSupportedGroup); the FFDHE
+  groups are fine because DHE reads the explicit dh_p/dh_g sent in
+  ServerKeyExchange and does not depend on the advertised group. }
 function TLS12DefaultSupportedGroups: TTLSNamedGroups;
 const
-  Groups: array[0..6] of Word = (
-    TLSNamedGroupSecp256r1, TLSNamedGroupSecp384r1, TLSNamedGroupSecp521r1,
-    TLSNamedGroupX25519, TLSNamedGroupFFDHE2048, TLSNamedGroupFFDHE3072,
+  Groups: array[0..4] of Word = (
+    TLSNamedGroupSecp256r1, TLSNamedGroupSecp384r1,
+    TLSNamedGroupFFDHE2048, TLSNamedGroupFFDHE3072,
     TLSNamedGroupFFDHE4096);
 var
   i: Integer;

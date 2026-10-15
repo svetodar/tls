@@ -556,8 +556,15 @@ begin
       Exit;
     end;
 
-    { 2e. Check pathLenConstraint. }
-    if (bc.PathLen >= 0) and (hops + 1 > bc.PathLen) then
+    { 2e. pathLenConstraint (X.509 BasicConstraints): the maximum number of
+      ADDITIONAL certificates that may appear in the certification path
+      below this CA, not counting the certificate being verified (the leaf).
+      The issuer sits at position hops + 1 from the leaf, so below it there
+      are hops + 1 certificates, of which hops are additional (CAs).
+      Require hops <= PathLen. (The old code counted the leaf too:
+      hops + 1 > PathLen — off-by-one, broke real chains like
+      example.com: issuer CA has pathlen:0 and issues the leaf directly.) }
+    if (bc.PathLen >= 0) and (hops > bc.PathLen) then
     begin
       Result.Reason := 'path length constraint exceeded';
       Exit;
