@@ -55,6 +55,54 @@ occasionally failed to verify (about 8% of randomly generated keys).
 `tests/test_rsa.pas` → `TestPSSModBitsBoundary` asserts that with a 1023-bit
 modulus the top two bits of EM are zero.
 
+## Windows default certificate store (task 18)
+
+On Windows the library now uses the system certificate store by default,
+so a consumer does not have to point it at a PEM bundle. `crypt32.dll` is
+a system API (not a crypto library), so this does not violate the "no
+external crypto dependencies" rule; it is the only external call the
+library makes on Windows — parsing and verification stay in pure Pascal.
+
+- `tls.certstore` gains `LoadWindowsSystemStore: TCertStore` (Windows
+  only). It opens the system `Root` and `CA` stores (`CertOpenStore` with
+  `CERT_SYSTEM_STORE_CURRENT_USER` / `LOCAL_MACHINE`), enumerates every
+  certificate (`CertEnumCertificatesInStore`), copies each certificate's
+  DER bytes out of its context (`CertGetCertificateContextData`), parses
+  them with `ParseCertificate` and adds the results via `AddOwnedCert`.
+  Every context is freed and both stores are closed before returning; a
+  store that cannot be opened raises the new typed error
+  `TWinCertStoreError`, a malformed certificate raises `EASN1Error` (the
+  partially filled store is dropped first).
+- `TCertStore` now distinguishes owned from referenced certificates:
+  `Add` keeps a reference only (the caller still owns the certificate),
+  `AddOwnedCert` records the certificate in an internal owned list that
+  `Destroy` frees. `LoadWindowsSystemStore` uses `AddOwnedCert`, so
+  freeing the returned store releases everything it created.
+- `TTLSSocketHandler.Connect` resolves the trust store in order: the
+  `TrustStore` property, then a bundle from
+  `CertificateData.CertCA.FileName`, then — on Windows only — the system
+  store via `LoadWindowsSystemStore` unless the new `DisableSystemStore`
+  field (default `False`) is set. The handler owns a store it loaded
+  itself and frees it after the handshake; with verification requested
+  and no store resolvable, `Connect` still returns `False`.
+- `examples/https_client.pas` and `tests/tools/tls13_client.pas` load the
+  Windows system store on Windows when no CA file is given (the caller
+  owns and frees it); on other platforms the old "no CA bundle" error is
+  kept.
+
+Tests (skipped off-Windows via `{$ifdef windows}`): `test_certverify` →
+`TestWinSystemStoreNonEmpty` (the loaded store is non-empty) and
+`TestWinSystemStoreKnownRoot` (the long-lived "Baltimore CyberTrust Root"
+is present); `test_tlssocket` → `TestWinSystemStoreFallback` (a connect to
+the local `openssl s_server` with no explicit store fails with a chain
+error — "issuer not found in store" — proving the fallback used the
+system store, where the fixture CA is absent, instead of the strict "no
+trust store" error) and `TestWinSystemStoreExampleDotCom` (a verified
+connect to `example.com:443` with no explicit store; runs only when
+`TLS_TEST_NETWORK=1`). `TestNoTrustStoreFails` sets
+`DisableSystemStore := True` so it still asserts the strict no-store
+failure on every platform.
+
 ## Verified vectors
 
 - **BN:** multiplication/division/ModInverse/ModPow checked against Python
@@ -91,6 +139,9 @@ modulus the top two bits of EM are zero.
   verified connect (RSA/ECDSA), unknown-CA and host-mismatch rejection, the
   strict no-trust-store error, verification-disabled mode, clean encrypted
   `close_notify`, and a 100 kB multi-record response read in 512-byte chunks.
+  On Windows the default system-store fallback is exercised by a
+  local-server chain-error test and a network test against `example.com`
+  (`TLS_TEST_NETWORK=1`).
 - **TLS 1.3:** HKDF-Extract/Expand against RFC 5869 A.1–A.3 (SHA-256) plus
   independent SHA-384 vectors; `HkdfLabel` serialization and
   `HKDF-Expand-Label` against python3/`openssl kdf` references. The complete
@@ -137,8 +188,12 @@ modulus the top two bits of EM are zero.
 - `tls.tlssocket` deliberately reads/writes the socket's file descriptor
   with `fprecv`/`fpsend` instead of `TSocketStream.Read/Write`: the socket
   owns the handler, so going through the stream would recurse into the TLS
-  handler. The handler defaults to `VerifyPeerCert = True`; without a trust
-  store `Connect` fails instead of silently accepting the certificate.
+  handler. The handler defaults to `VerifyPeerCert = True`; the trust store
+  is resolved from `TrustStore`, then `CertificateData.CertCA.FileName`,
+  then — on Windows — the system store (Root + CA) via
+  `LoadWindowsSystemStore` unless `DisableSystemStore` is set; if no store
+  can be resolved, `Connect` fails instead of silently accepting the
+  certificate.
 - After the handshake, alerts (including `close_notify`) are AEAD-protected;
   `TTLS12Client.Recv` decrypts them before decoding, so a normal close is
   reported as EOF (0) rather than as a receive error (-1).
@@ -176,6 +231,9 @@ modulus the top two bits of EM are zero.
 - Units are compiled into `build/`; never commit `*.o`/`*.ppu` build output.
 - A `{$...}` directive nested inside a `{}` comment produces a "Comment
   level 2" warning but is accepted; keep such combinations balanced.
+- A `raise;` statement directly in an `except` block followed by a
+  `finally` clause is not parsed; nest the `try/except` inside an outer
+  `try/finally` (used in `LoadWindowsSystemStore`).
 
 ## How to rebuild test data
 
@@ -191,3 +249,80 @@ vectors are kept. See [`openssl-reference.md`](openssl-reference.md).
 Running the end-to-end tests (TLS 1.2 and 1.3) requires the `*.key` files:
 run `make fixtures` to generate them (the keys are git-ignored). Without them
 the e2e tests are skipped.
+
+## Resource-leak audit (2026-10-19)
+
+The library was audited for leaked heap objects (the test runner is built
+with `-gh`, so `heap dump by heaptrc` at the end of a run names every block
+that was never freed) and for leaked OS resources (file handles, library
+handles, `crypt32` certificate contexts and stores).
+
+Resource handles. `LoadWindowsSystemStore` closes both system stores on every
+path, `LoadPEM`/`LoadBundle` free their `TStringList`, `tls.rand` frees the
+`bcrypt.dll` handle (and the `/dev/urandom` stream on Unix) and its global
+`TCriticalSection`. No handle leak was found.
+
+`CERT_CONTEXT` handling was worse than a leak: `EnumWinStore` called
+`CertEnumCertificatesInStore(hStore, ctx)` to fetch the next context and then
+read `ctx^.pbCertEncoded` and finally called `CertFreeCertificateContext(ctx)`.
+The enumerator *frees* the context passed to it as `pPrevCertContext`, so the
+DER bytes were read from freed memory and every context was freed twice. That
+corrupted the heap: on Windows the three system-store tests (and therefore the
+whole certificate-verification suite, and `make test`) ended with exit code
+`0xC0000374` (`STATUS_HEAP_CORRUPTION`) even though the assertions passed.
+`EnumWinStore` now copies the DER bytes while the context is still valid and
+lets the enumerator release each context; the only context it frees itself is
+the one still held when an exception aborts the loop.
+
+Heap objects. These leaks were found and fixed:
+
+- `tls.x509`: `ParseCertificate`, `ParseName` and `ParseSPKI` returned an
+  object only on success but had no handler for the error path, so a
+  malformed certificate leaked a `TX509Cert` (with everything already parsed
+  into it); `GetBasicConstraints` and the version field called
+  `BNToLongInt(ReadInteger(...))`, which drops the `TBN` that `ReadInteger`
+  creates — two objects (40 bytes) per parsed certificate. The new
+  `ReadIntegerAsLongInt` releases that temporary.
+- `tls.asn1`: `ParseDER` leaked the parsed tree when trailing bytes made it
+  reject the input.
+- `tls.certstore`: `LoadBundle` added the certificates it parsed with `Add`
+  (reference only), so freeing the returned store kept every certificate
+  alive; it now uses `AddOwnedCert` and releases both the store and the
+  certificates parsed so far when the bundle is malformed. `Clear` now
+  frees the owned certificates as its documentation always claimed.
+- `tls.bn`: `NotBits` leaked the three temporaries of its chained expression.
+- `tls.dh`: `Generate` and `ValidatePeerPubFull` leaked the `2`/`1`
+  constants they built inline and every value they overwrote (`Priv`, `Q`).
+- `tls.rsa`: `IsPrime` never freed `n-1`, `d`, `a`, `x` and `tmp` (on any
+  path, including every Miller–Rabin round), `Generate` leaked each rejected
+  candidate and the `p-1`/`q-1` factors, `SignPKCS1v15`/`SignPSS` leaked the
+  encoded message, and `FromPublicBytes` leaked the two `TBN` it passed to
+  `FromPublic`.
+- `tls.ec`: `CurveP256`/`CurveP384` leaked the two coordinate `TBN` handed to
+  `TECPoint.CreateFromXY` (which clones them) on every call, `PointNeg`
+  leaked its `0` constant, and `ECDSASign` leaked the half-built signature
+  when it raised.
+
+Verification: the X.509 and certificate-verification suites now report
+`0 unfreed memory blocks`, and the EC, TLS 1.2, TLS 1.3 and socket suites no
+longer report any block allocated inside `src/`. The three system-store tests
+(`TestWinSystemStoreNonEmpty`, `TestWinSystemStoreKnownRoot`,
+`TestWinSystemStoreNoLeak`), individually and inside the whole
+`TCertVerifyTests` suite, now exit with status 0 instead of
+`0xC0000374`.
+
+Known remaining leaks are all in test code, which builds `TBN`/`TECPoint`
+objects inline in assertions and never frees them: `tests/test_bn.pas`
+(`TestSmallArithmetic`, `TestModInverseKnown`, `TestDivideProperty`,
+`TestModInverseProperty`, `TestModPowLaws`, `TestFermat61`,
+`TestPerformance2048`), `tests/test_rsa.pas` (the RSADP/RSASP1/PSS vector
+tests, `TestGenerateAndRoundTrip`, `TestPKCS1v15EncodeDecode`),
+`tests/test_dh.pas` (`TestSymmetrySmallPrime`) and `tests/test_asn1.pas`.
+They are one-shot allocations in short-lived test processes, so they do not
+affect the library; cleaning them up is a follow-up task. The test helpers
+that were cheap to fix were fixed: `test_rand` (`TestRandomBitsRange`,
+`TestRandomBitsWithTBN`), `test_ec` (the new `PointFromHex` helper,
+`TestScalarMulSmall`, `TestECDSATampered`), `test_rsa` (`TestIsPrime` builds
+its candidates through a helper that frees them) and `test_certverify`
+(`MakeStore` hands the certificate to the store with `AddOwnedCert` instead
+of leaking it).

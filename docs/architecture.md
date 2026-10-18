@@ -33,11 +33,11 @@ it:
 | `tls.dh` | Finite-field Diffie-Hellman (DHE), standard groups. | `tls.bn`, `tls.rand` |
 | `tls.asn1` | ASN.1/DER parser and encoder. | — |
 | `tls.x509` | X.509 v3 certificate parsing (subject/issuer, validity, SPKI, extensions). | `tls.asn1`, `tls.bn`, `tls.ec`, `tls.rsa` |
-| `tls.certstore` | Trust store, chain building and signature/validity verification. | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
+| `tls.certstore` | Trust store, chain building and signature/validity verification; `LoadWindowsSystemStore` (Windows only) populates a store from the system `Root`/`CA` stores via `crypt32.dll` (raises `TWinCertStoreError` on failure); `TCertStore` tracks ownership (`Add` vs `AddOwnedCert`). | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627). | `tls.hmac` |
 | `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`, high-level `TTLS12Client`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
 | `tls.tls13` | TLS 1.3 client (RFC 8446): HKDF key schedule, AEAD-only record layer, 1-RTT handshake, `TTLS13Client`; HelloRetryRequest/0-RTT are rejected. | `tls.tls12`, `tls.sha2`, `tls.hmac`, `tls.rand`, `tls.bn`, `tls.ec`, `tls.x25519`, `tls.rsa`, `tls.x509`, `tls.certstore`, `tls.aes`, `tls.chacha20` |
-| `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` adapter over a connected socket (`TTLSInetSocketTransport`). | `tls.tls12`, `tls.certstore`, `ssockets`, `sslsockets`, `sslbase` |
+| `tls.tlssocket` | FPC `sslsockets`-compatible socket handler (`TTLSSocketHandler`) and `ITLSTransport` adapter over a connected socket (`TTLSInetSocketTransport`); on Windows, `Connect` falls back to the system certificate store unless `DisableSystemStore` is set. | `tls.tls12`, `tls.certstore`, `ssockets`, `sslsockets`, `sslbase` |
 
 ## Transport abstraction
 
@@ -81,6 +81,32 @@ Record and handshake limits are explicit constants (`TLSRecordMaxPayload`,
 
 The result is a `TVerifyResult` with an `OK` flag, the chain length and a
 human-readable `Reason` (used by tests and by the socket layer).
+
+On Windows, `LoadWindowsSystemStore` (Windows only) populates a new
+`TCertStore` from the system certificate store: it opens the `Root` and
+`CA` stores of the current user and the local machine through the system
+`crypt32.dll` API (`CertOpenStore`, `CertEnumCertificatesInStore`,
+`CertGetCertificateContextData`), reads each certificate's DER bytes and
+parses them with `ParseCertificate`. `crypt32.dll` is a system API, not a
+crypto library, so this does not violate the no-external-crypto rule;
+parsing and verification stay in pure Pascal. It raises
+`TWinCertStoreError` if a store cannot be opened and `EASN1Error` if a
+certificate in the store is malformed.
+
+`TCertStore` tracks ownership: `Add` keeps a reference to a certificate
+owned by the caller, while `AddOwnedCert` records a certificate the store
+created itself (from parsed DER); `Destroy` and `Clear` free the owned
+certificates and leave the referenced ones alone. `LoadBundle` parses the
+certificates it reads, so it registers them with `AddOwnedCert`: freeing the
+returned store releases them, and a malformed bundle releases both the store
+and the certificates parsed so far before the error propagates.
+
+`TTLSSocketHandler` resolves the trust store in this order: the
+`TrustStore` property, then a bundle loaded from
+`CertificateData.CertCA.FileName`, and, on Windows only, the system store
+via `LoadWindowsSystemStore` (the handler owns and frees the store it
+loads itself). `DisableSystemStore := True` disables the Windows fallback:
+with no store configured, `Connect` then fails.
 
 ## TLS 1.2 client
 

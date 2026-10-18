@@ -104,7 +104,11 @@ rewriting its I/O code: `tls.tlssocket` registers `TTLSSocketHandler` as the
 default `TSSLSocketHandler` class, and exposes the same `Connect`, `Send`,
 `Recv`, `Close`, `Shutdown` and `VerifyPeerCert` surface. Certificates are
 verified by default; a trust store is configured with `TrustStorePath` (a
-PEM bundle) or by assigning a `TCertStore` to `TrustStore`.
+PEM bundle) or by assigning a `TCertStore` to `TrustStore`. On Windows, when
+no trust store is configured, `Connect` falls back to the Windows system
+certificate store (the Root and CA stores of the current user and the local
+machine) via `LoadWindowsSystemStore`; set `DisableSystemStore := True` to
+opt out of that fallback.
 
 ```pascal
 uses ssockets, tls.tlssocket;

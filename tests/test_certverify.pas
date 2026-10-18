@@ -3,7 +3,8 @@ unit test_certverify;
 
 { Certificate chain verification tests (tls.certstore):
   VerifyChain, VerifySignature, CheckValidity, WildcardMatch, CertMatchesHost,
-  TCertStore (Add/FindBySubject/FindBySKI/Clear). }
+  TCertStore (Add/FindBySubject/FindBySKI/Clear),
+  LoadWindowsSystemStore (Windows only; skipped on other platforms). }
 
 {$mode objfpc}{$H+}
 
@@ -62,12 +63,19 @@ type
     procedure TestStoreFindBySKI;
     procedure TestStoreClear;
     procedure TestStoreAt;
+    { --- Windows system store (skipped off-Windows) --- }
+    procedure TestWinSystemStoreNonEmpty;
+    procedure TestWinSystemStoreKnownRoot;
+    procedure TestWinSystemStoreNoLeak;
   end;
 
 implementation
 
 uses
   SysUtils, Classes, DateUtils,
+{$ifdef windows}
+  heaptrc,
+{$endif}
   tls.asn1, tls.x509, tls.certstore;
 
 {--- Helper functions ---}
@@ -104,12 +112,9 @@ var
 begin
   Result := TCertStore.Create;
   ca := ParseFixture(CAName);
-  try
-    Result.Add(ca);
-  finally
-    { Add stores a reference, so we don't Free ca here —
-      the store owns the certificate. }
-  end;
+  { The store parsed nothing itself here, so it is told to own the
+    certificate: Destroy frees it together with the store. }
+  Result.AddOwnedCert(ca);
 end;
 
 {--- VerifyChain: successful chains ---}
@@ -758,6 +763,147 @@ begin
   end;
 end;
 
+{--- Windows system store ---}
+
+procedure TCertVerifyTests.TestWinSystemStoreNonEmpty;
+{$ifdef windows}
+var
+  store: TCertStore;
+{$endif}
+begin
+{$ifdef windows}
+  { LoadWindowsSystemStore is only declared on Windows; on other
+    platforms this test is skipped. }
+  store := LoadWindowsSystemStore;
+  try
+    AssertTrue('Windows system store is not empty', store.Count > 0);
+  finally
+    store.Free;
+  end;
+{$else}
+  { Not on Windows — skipped. }
+{$endif}
+end;
+
+procedure TCertVerifyTests.TestWinSystemStoreKnownRoot;
+{$ifdef windows}
+var
+  store: TCertStore;
+  i: LongInt;
+  found: Boolean;
+{$endif}
+begin
+{$ifdef windows}
+  { The Windows Root store has contained the long-lived
+    "Baltimore CyberTrust Root" (DigiCert) certificate for many years;
+    assert that it is present in the loaded store. }
+  store := LoadWindowsSystemStore;
+  try
+    found := False;
+    for i := 0 to store.Count - 1 do
+      if Pos('baltimore cybertrust root',
+             LowerCase(store.At(i).Subject.ToNameString)) > 0 then
+      begin
+        found := True;
+        Break;
+      end;
+    AssertTrue('well-known root present in system store', found);
+  finally
+    store.Free;
+  end;
+{$else}
+  { Not on Windows — skipped. }
+{$endif}
+end;
+
+{$ifdef windows}
+{ Read the "unfreed memory blocks" byte count from a heaptrc DumpHeap
+  report file. Returns -1 if the file is missing or the line is absent. }
+function ReadUnfreedBytes(const AFile: string): Int64;
+var
+  sl: TStringList;
+  i, start, colon: Integer;
+  num: string;
+begin
+  Result := -1;
+  if not FileExists(AFile) then Exit;
+  sl := TStringList.Create;
+  try
+    sl.LoadFromFile(AFile);
+    for i := 0 to sl.Count - 1 do
+    begin
+      start := Pos('unfreed memory blocks : ', sl[i]);
+      if start > 0 then
+      begin
+        Inc(start, Length('unfreed memory blocks : '));
+        colon := start;
+        while (colon <= Length(sl[i])) and (sl[i][colon] <> ' ') do
+          Inc(colon);
+        num := Copy(sl[i], start, colon - start);
+        TryStrToInt64(num, Result);
+        Exit;
+      end;
+    end;
+  finally
+    sl.Free;
+  end;
+end;
+{$endif windows}
+
+procedure TCertVerifyTests.TestWinSystemStoreNoLeak;
+{$ifdef windows}
+var
+  store: TCertStore;
+  i: LongInt;
+  before, after: Int64;
+  tmp, beforeFile, afterFile, sinkFile: string;
+{$endif}
+begin
+{$ifdef windows}
+  { heaptrc (enabled via -gh) tracks every heap allocation. We compare
+    the bytes held in unfreed blocks before and after repeated
+    LoadWindowsSystemStore calls: a leak would show up as a growing
+    unfreed total. A warm-up load+free runs first so one-time
+    allocations (crypt32 load, etc.) happen before the baseline.
+    heaptrc keeps its output file open, so after each DumpHeap the
+    output is re-pointed to a scratch file, which closes the dump
+    before it is read back. }
+  tmp := IncludeTrailingPathDelimiter(GetTempDir);
+  beforeFile := tmp + 'tls_winstore_leak_before.log';
+  afterFile := tmp + 'tls_winstore_leak_after.log';
+  sinkFile := tmp + 'tls_winstore_leak_sink.log';
+  DeleteFile(sinkFile);
+  store := LoadWindowsSystemStore;
+  store.Free;
+
+  DeleteFile(beforeFile);
+  SetHeapTraceOutput(beforeFile);
+  DumpHeap;
+  SetHeapTraceOutput(sinkFile);
+  before := ReadUnfreedBytes(beforeFile);
+
+  for i := 1 to 5 do
+  begin
+    store := LoadWindowsSystemStore;
+    store.Free;
+  end;
+
+  DeleteFile(afterFile);
+  SetHeapTraceOutput(afterFile);
+  DumpHeap;
+  SetHeapTraceOutput(sinkFile);
+  after := ReadUnfreedBytes(afterFile);
+
+  AssertTrue('heaptrc baseline captured', before >= 0);
+  AssertTrue('heaptrc after captured', after >= 0);
+  { A real leak (an unfreed store or its DER bytes) is far larger than
+    this bound; the delta should stay near zero. }
+  AssertTrue('no heap growth from repeated LoadWindowsSystemStore',
+    (after - before) < 512 * 1024);
+{$else}
+  { Not on Windows — skipped. }
+{$endif}
+end;
 initialization
   RegisterTest(TCertVerifyTests);
 

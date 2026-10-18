@@ -14,8 +14,9 @@ program https_client;
     --insecure   do not verify the server certificate (demo/self-signed only)
 
   If no CA file is given and --insecure is not used, the client tries the
-  well-known system bundles. Without a trust store the connection is refused
-  (strict by default). }
+  well-known system bundles; on Windows it falls back to the system
+  certificate store (Root + CA) via LoadWindowsSystemStore. Without a trust
+  store the connection is refused (strict by default). }
 
 {$mode objfpc}{$H+}
 
@@ -90,17 +91,30 @@ var
   Request, Response: AnsiString;
   Buf: array[0..8191] of Byte;
   N: Integer;
+  SysStore: TCertStore;
 begin
+  SysStore := nil;
   Handler := TTLSSocketHandler.Create;
   Handler.VerifyPeerCert := not Insecure;
   if not Insecure then
   begin
     if CaFile = '' then
       CaFile := DefaultCaFile;
+    if CaFile <> '' then
+      Handler.TrustStorePath := CaFile;
+{$ifdef windows}
+    {No CA file: use the Windows system certificate store (Root + CA).
+      The handler does not own this store, so it is freed below.}
+    if CaFile = '' then
+    begin
+      SysStore := LoadWindowsSystemStore;
+      Handler.TrustStore := SysStore;
+    end;
+{$else}
     if CaFile = '' then
       raise Exception.Create(
         'no CA bundle found; pass a cafile or use --insecure');
-    Handler.TrustStorePath := CaFile;
+{$endif}
   end;
 
   Sock := TInetSocket.Create(Host, Port, Handler);
@@ -137,6 +151,8 @@ begin
     Write(Response);
   finally
     Sock.Free;   {frees the handler as well}
+    if SysStore <> nil then
+      SysStore.Free;
   end;
 end;
 

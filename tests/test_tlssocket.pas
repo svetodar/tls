@@ -5,7 +5,10 @@ unit test_tlssocket;
   The handler is exercised against a real local `openssl s_server` with the
   test certificates in tests/fixtures (the same external reference used by
   test_tls12_e2e). When `openssl` or the fixtures are missing the tests
-  silently pass (skipped), matching the existing E2E convention. }
+  silently pass (skipped), matching the existing E2E convention. One test
+  additionally exercises the Windows default system-store fallback (task 18)
+  and is skipped off-Windows; a network-required test against example.com
+  runs only when TLS_TEST_NETWORK=1. }
 
 {$mode objfpc}{$H+}
 
@@ -19,6 +22,8 @@ type
   published
     procedure TestDefaultHandlerRegistered;
     procedure TestNoTrustStoreFails;
+    procedure TestWinSystemStoreFallback;
+    procedure TestWinSystemStoreExampleDotCom;
     procedure TestUnknownCARejected;
     procedure TestHostMismatchRejected;
     procedure TestVerificationDisabledAccepts;
@@ -184,7 +189,8 @@ end;
   failure and coOK on success. }
 function AttemptConnect(const AHost: string; APort: Word; AVerify: Boolean;
   ATrustCA: string; out ASock: TInetSocket;
-  out AHandler: TTLSSocketHandler; out AError: string): TConnectOutcome;
+  out AHandler: TTLSSocketHandler; out AError: string;
+  ADisableSystemStore: Boolean = False): TConnectOutcome;
 var
   H: TTLSSocketHandler;
   Store: TCertStore;
@@ -198,6 +204,7 @@ begin
   H := TTLSSocketHandler.Create;
   try
     H.VerifyPeerCert := AVerify;
+    H.DisableSystemStore := ADisableSystemStore;
     if ATrustCA <> '' then
     begin
       Store := LoadBundle(FixturePath(ATrustCA));
@@ -242,7 +249,7 @@ end;
   On success returns the socket; on failure returns nil with the reason. }
 function TryConnect(const AHost: string; APort: Word; AVerify: Boolean;
   ATrustCA: string; out AHandler: TTLSSocketHandler;
-  out AError: string): TInetSocket;
+  out AError: string; ADisableSystemStore: Boolean = False): TInetSocket;
 const
   MaxAttempts = 100;
 var
@@ -255,7 +262,7 @@ begin
   for Attempt := 1 to MaxAttempts do
   begin
     Outcome := AttemptConnect(AHost, APort, AVerify, ATrustCA,
-      Result, AHandler, AError);
+      Result, AHandler, AError, ADisableSystemStore);
     case Outcome of
       coOK:
         Exit;
@@ -346,13 +353,15 @@ var
   H: TTLSSocketHandler;
   Err: string;
 begin
+  {Disable the Windows system-store fallback so the test still exercises
+    the strict "no trust store" failure path on every platform.}
   P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
   Sock := nil;
   try
-    Sock := TryConnect('localhost', Port, True, '', H, Err);
+    Sock := TryConnect('localhost', Port, True, '', H, Err, True);
     AssertTrue('connect must fail without a trust store', Sock = nil);
     AssertTrue('reason mentions the trust store', Pos('trust store', Err) > 0);
   finally
@@ -360,6 +369,80 @@ begin
     P.Terminate(0);
     P.Free;
   end;
+end;
+
+{ On Windows, when no trust store is configured, Connect falls back to the
+  system certificate store (Root + CA). The local test server is signed by
+  the fixture CA, which is not in the system store, so verification must
+  fail with a chain error ("issuer not found in store") rather than the
+  strict "no trust store configured" error. Skipped off-Windows. }
+procedure TTLSSocketTests.TestWinSystemStoreFallback;
+{$ifdef windows}
+var
+  P: TProcess;
+  Port: Word;
+  Sock: TInetSocket;
+  H: TTLSSocketHandler;
+  Err: string;
+{$endif}
+begin
+{$ifdef windows}
+  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+    'ECDHE-RSA-AES128-GCM-SHA256', Port);
+  if P = nil then
+    Exit;   { openssl or fixtures unavailable — skipped }
+  Sock := nil;
+  try
+    Sock := TryConnect('localhost', Port, True, '', H, Err);
+    AssertTrue('connect must fail: the fixture CA is not in the system store',
+      Sock = nil);
+    AssertTrue('failure is a chain verification error, not a missing store',
+      Pos('certificate chain verification failed', Err) > 0);
+    AssertTrue('issuer lookup failed against the system store',
+      Pos('issuer not found in store', Err) > 0);
+  finally
+    Sock.Free;
+    P.Terminate(0);
+    P.Free;
+  end;
+{$else}
+  { Not on Windows — skipped. }
+{$endif}
+end;
+
+{ Network-required test of the Windows default system-store fallback
+  (task 18): connect to a real public HTTPS endpoint with certificate
+  verification enabled and no explicit trust store. On Windows the handler
+  falls back to the system store (Root + CA), so the handshake must succeed
+  against example.com's real certificate chain. Disabled unless
+  TLS_TEST_NETWORK=1 so that `make test` stays offline; skipped off-Windows. }
+procedure TTLSSocketTests.TestWinSystemStoreExampleDotCom;
+{$ifdef windows}
+var
+  Sock: TInetSocket;
+  H: TTLSSocketHandler;
+  Err, Req, Resp: AnsiString;
+{$endif}
+begin
+{$ifdef windows}
+  if GetEnvironmentVariable('TLS_TEST_NETWORK') <> '1' then
+    Exit;   { network required — skipped by default }
+  Sock := TryConnect('example.com', 443, True, '', H, Err);
+  AssertTrue('verified connect against the system store: ' + Err,
+    Sock <> nil);
+  try
+    Req := 'GET / HTTP/1.0'#13#10'Host: example.com'#13#10 +
+      'Connection: close'#13#10#13#10;
+    AssertEquals('request fully sent', Length(Req),
+      H.Send(Req[1], Length(Req)));
+    Resp := ReadAll(H);
+    AssertTrue('HTTP response received', Pos('HTTP/1.', Resp) = 1);
+  finally
+    Sock.Free;
+  end;
+{$else}
+  { Not on Windows — skipped. }
+{$endif}
 end;
 
 procedure TTLSSocketTests.TestUnknownCARejected;
