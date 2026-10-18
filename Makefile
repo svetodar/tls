@@ -5,6 +5,7 @@
 #   make            build and run the unit tests (default)
 #   make build      build the test runner only
 #   make test       run the unit tests
+#   make leaktest   build the runner with heap tracing and run the leak checks
 #   make fixtures   (re)generate tests/fixtures with OpenSSL and Python 3
 #   make clean      remove build output
 
@@ -15,6 +16,7 @@ BUILD    := build
 BIN      := bin
 LIB      := $(BUILD)/lib
 TESTLIB  := $(BUILD)/testlib
+LEAKLIB  := $(BUILD)/leaklib
 
 # Executable suffix: .exe on Windows.
 ifeq ($(OS),Windows_NT)
@@ -22,13 +24,16 @@ EXEEXT := .exe
 endif
 
 TESTAPP := $(BIN)/testrunner$(EXEEXT)
+LEAKAPP := $(BIN)/testrunner_leak$(EXEEXT)
 EXAMPLEAPP := $(BIN)/https_client$(EXEEXT)
 
 # -O2 -gl: optimisation plus debug information; -Fusrc: unit search path.
 FPCFLAGS := -O2 -gl -Fusrc
-# The test runner is built with heap tracing (-gh) so the Windows
-# LoadWindowsSystemStore leak test can use the heaptrc unit.
-TESTFLAGS := $(FPCFLAGS) -gh
+# Heap tracing is opt-in: heaptrc slows every allocation down (the EC and
+# RSA suites take minutes instead of seconds), so the normal test run stays
+# fast and only `make leaktest` pays for it. The leak checks in the tests
+# are compiled in with -dTLS_HEAPTRACE.
+LEAKFLAGS := $(FPCFLAGS) -gh -dTLS_HEAPTRACE
 
 # gmkdir is a cross-platform "mkdir -p" shipped with some FPC builds.
 # On Unix fall back to the system mkdir when it is missing.
@@ -65,10 +70,19 @@ check-no-openssl:
 	done | grep -iE '\b(openssl|opensslsockets|fpopenssl)\b' \
 	  && { echo "ERROR: OpenSSL unit referenced in a uses clause"; exit 1; } \
 	  || echo "OK: no OpenSSL unit references"
-
 $(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES)
 	@$(GMKDIR) $(TESTLIB) $(BIN)
-	$(FPC) $(TESTFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
+	$(FPC) $(FPCFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
+
+# Same runner built with heap tracing, so the leak checks can read heaptrc.
+# Kept apart from `make test`: tracing makes the crypto suites very slow.
+$(LEAKAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES)
+	@$(GMKDIR) $(LEAKLIB) $(BIN)
+	$(FPC) $(LEAKFLAGS) -Fu$(TESTS) -FU$(LEAKLIB) -FE$(BIN) \
+	  -o$(LEAKAPP) $(TESTS)/testrunner.lpr
+
+leaktest: $(LEAKAPP)
+	$(LEAKAPP) --suite=TCertVerifyTests --format=plain
 
 # Regenerate certificate and DER fixtures. Requires `openssl` and `python3`.
 # The key files produced here are git-ignored: they are test data only.
@@ -80,4 +94,4 @@ clean:
 	rm -f $(SRC)/*.o $(SRC)/*.ppu $(TESTS)/*.o $(TESTS)/*.ppu
 	rm -f $(TESTS)/tools/*.o $(TESTS)/tools/*.ppu
 
-.PHONY: all build test fixtures example check-no-openssl clean
+.PHONY: all build test leaktest fixtures example check-no-openssl clean

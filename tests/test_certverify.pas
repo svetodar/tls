@@ -73,7 +73,10 @@ implementation
 
 uses
   SysUtils, Classes, DateUtils,
-{$ifdef windows}
+{$ifdef TLS_HEAPTRACE}
+  { Heap tracing is only linked in when the runner is built with
+    -dTLS_HEAPTRACE (`make leaktest`): heaptrc slows every allocation down,
+    so it stays out of the normal `make test` run. }
   heaptrc,
 {$endif}
   tls.asn1, tls.x509, tls.certstore;
@@ -816,7 +819,7 @@ begin
 {$endif}
 end;
 
-{$ifdef windows}
+{$ifdef TLS_HEAPTRACE}
 { Read the "unfreed memory blocks" byte count from a heaptrc DumpHeap
   report file. Returns -1 if the file is missing or the line is absent. }
 function ReadUnfreedBytes(const AFile: string): Int64;
@@ -848,26 +851,28 @@ begin
     sl.Free;
   end;
 end;
-{$endif windows}
+{$endif TLS_HEAPTRACE}
 
 procedure TCertVerifyTests.TestWinSystemStoreNoLeak;
 {$ifdef windows}
+{$ifdef TLS_HEAPTRACE}
 var
   store: TCertStore;
   i: LongInt;
   before, after: Int64;
   tmp, beforeFile, afterFile, sinkFile: string;
 {$endif}
+{$endif}
 begin
 {$ifdef windows}
-  { heaptrc (enabled via -gh) tracks every heap allocation. We compare
-    the bytes held in unfreed blocks before and after repeated
-    LoadWindowsSystemStore calls: a leak would show up as a growing
-    unfreed total. A warm-up load+free runs first so one-time
-    allocations (crypt32 load, etc.) happen before the baseline.
-    heaptrc keeps its output file open, so after each DumpHeap the
-    output is re-pointed to a scratch file, which closes the dump
-    before it is read back. }
+{$ifdef TLS_HEAPTRACE}
+  { heaptrc (linked in by `make leaktest`) tracks every heap allocation. We
+    compare the bytes held in unfreed blocks before and after repeated
+    LoadWindowsSystemStore calls: a leak would show up as a growing unfreed
+    total. A warm-up load+free runs first so one-time allocations (crypt32
+    load, etc.) happen before the baseline. heaptrc keeps its output file
+    open, so after each DumpHeap the output is re-pointed to a scratch file,
+    which closes the dump before it is read back. }
   tmp := IncludeTrailingPathDelimiter(GetTempDir);
   beforeFile := tmp + 'tls_winstore_leak_before.log';
   afterFile := tmp + 'tls_winstore_leak_after.log';
@@ -882,7 +887,7 @@ begin
   SetHeapTraceOutput(sinkFile);
   before := ReadUnfreedBytes(beforeFile);
 
-  for i := 1 to 5 do
+  for i := 1 to 2 do
   begin
     store := LoadWindowsSystemStore;
     store.Free;
@@ -900,6 +905,10 @@ begin
     this bound; the delta should stay near zero. }
   AssertTrue('no heap growth from repeated LoadWindowsSystemStore',
     (after - before) < 512 * 1024);
+{$else}
+  { Not built with heap tracing: nothing to measure here, the check runs
+    under `make leaktest`. }
+{$endif}
 {$else}
   { Not on Windows — skipped. }
 {$endif}

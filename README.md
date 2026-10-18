@@ -50,6 +50,7 @@ regenerated certificate keys are unavailable).
 make            # build the test runner and run the unit tests
 make build      # build bin/testrunner only
 make test       # run the tests
+make leaktest   # same runner built with heaptrc; runs the leak checks
 make example    # build bin/https_client (OpenSSL-free HTTPS client)
 make check-no-openssl  # verify no library/example uses clause pulls in openssl
 ./build.sh      # same as "make test", with a gmkdir shim when needed

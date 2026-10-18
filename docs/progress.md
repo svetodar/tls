@@ -248,14 +248,27 @@ vectors are kept. See [`openssl-reference.md`](openssl-reference.md).
 
 Running the end-to-end tests (TLS 1.2 and 1.3) requires the `*.key` files:
 run `make fixtures` to generate them (the keys are git-ignored). Without them
-the e2e tests are skipped.
+the e2e tests are skipped. Rebuilding the fixtures also changes their keys,
+so the two reference signatures in `test_tls13.TestCertificateVerifySignatures`
+(`EC_SIG`, `RSA_SIG`) must be regenerated as the comment above that test
+describes; otherwise it fails with an "openssl ... signature verifies"
+assertion.
 
 ## Resource-leak audit (2026-10-19)
 
-The library was audited for leaked heap objects (the test runner is built
+The library was audited for leaked heap objects (with the test runner built
 with `-gh`, so `heap dump by heaptrc` at the end of a run names every block
 that was never freed) and for leaked OS resources (file handles, library
 handles, `crypt32` certificate contexts and stores).
+
+Heap tracing is opt-in: `make test` builds the runner without it, while
+`make leaktest` builds `bin/testrunner_leak` with `-gh -dTLS_HEAPTRACE` and
+runs the certificate-verification suite. Tracing a whole run costs too much —
+heaptrc hooks every allocation, and the EC and certificate suites then take
+minutes instead of seconds — so only the leak checks pay for it. The
+`TestWinSystemStoreNoLeak` dump itself is slow (heaptrc walks the whole heap
+twice: about 12 minutes on a desktop with a full Windows root store), which
+is another reason it stays out of `make test`.
 
 Resource handles. `LoadWindowsSystemStore` closes both system stores on every
 path, `LoadPEM`/`LoadBundle` free their `TStringList`, `tls.rand` frees the
@@ -305,11 +318,13 @@ Heap objects. These leaks were found and fixed:
 
 Verification: the X.509 and certificate-verification suites now report
 `0 unfreed memory blocks`, and the EC, TLS 1.2, TLS 1.3 and socket suites no
-longer report any block allocated inside `src/`. The three system-store tests
+longer report any block allocated inside `src/`. The system-store tests
 (`TestWinSystemStoreNonEmpty`, `TestWinSystemStoreKnownRoot`,
 `TestWinSystemStoreNoLeak`), individually and inside the whole
-`TCertVerifyTests` suite, now exit with status 0 instead of
-`0xC0000374`.
+`TCertVerifyTests` suite, now exit with status 0 instead of `0xC0000374`.
+`TestWinSystemStoreNoLeak` needs heaptrc, so it only measures under
+`make leaktest`; in the normal run it is compiled without tracing and passes
+without doing anything.
 
 Known remaining leaks are all in test code, which builds `TBN`/`TECPoint`
 objects inline in assertions and never frees them: `tests/test_bn.pas`

@@ -85,6 +85,9 @@ stays in pure Pascal.
   `DisableSystemStore := True` so it still asserts the strict failure).
 - `TCertStore.Destroy` frees owned certificates (no leak); non-owned
   references are still not freed by the store.
+- The system-store leak check (`TestWinSystemStoreNoLeak`) passes under
+  `make leaktest`, which builds the runner with heap tracing; the normal
+  `make test` run stays untraced.
 - `make test` passes; `make check-no-openssl` still reports no OpenSSL unit
   references (`crypt32.dll` is not an OpenSSL unit).
 
