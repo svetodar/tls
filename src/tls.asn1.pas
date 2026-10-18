@@ -402,7 +402,13 @@ var
 begin
   Result := ParseDERAt(Buf, 0, Length(Buf), endOff);
   if endOff <> Length(Buf) then
+  begin
+    { Trailing bytes: the parsed tree is not returned to the caller, so it
+      must be released here — otherwise every rejected input leaks it. }
+    Result.Free;
+    Result := nil;
     raise EASN1Error.Create('ParseDER: bytes after structure');
+  end;
 end;
 
 {--- Serializer ---}

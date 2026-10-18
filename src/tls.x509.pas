@@ -236,6 +236,20 @@ begin
     Result := StrToIntDef(B.ToString, 0);
 end;
 
+{ INTEGER node → LongInt. ReadInteger always returns a new TBN that the caller
+  owns; converting through a temporary keeps that contract and frees it. }
+function ReadIntegerAsLongInt(const Node: TASN1Node): LongInt;
+var
+  B: TBN;
+begin
+  B := ReadInteger(Node);
+  try
+    Result := BNToLongInt(B);
+  finally
+    B.Free;
+  end;
+end;
+
 { IP bytes → dotted-decimal string (IPv4/IPv6). }
 function IPToString(const B: TBytes): string;
 var
@@ -291,23 +305,36 @@ var
   rdn: TRDN;
 begin
   Result := TX509Name.Create;
-  if (Node = nil) or (Node.TagClass <> tcUniversal) or
-     (Node.TagNumber <> Ord(atSequence)) then
-    raise EASN1Error.Create('ParseName: node is not SEQUENCE (Name)');
-  for i := 0 to Node.ChildCount - 1 do
-  begin
-    rdnNode := Node.ChildAt(i);  { SET OF AttributeTypeAndValue }
-    if (rdnNode.TagClass <> tcUniversal) or (rdnNode.TagNumber <> Ord(atSet)) then
-      raise EASN1Error.Create('ParseName: RDN is not SET');
-    rdn := TRDN.Create;
-    for j := 0 to rdnNode.ChildCount - 1 do
+  { The caller receives the object only on success: free it (and the RDN
+    being filled) when a malformed Name aborts the parse. }
+  try
+    if (Node = nil) or (Node.TagClass <> tcUniversal) or
+       (Node.TagNumber <> Ord(atSequence)) then
+      raise EASN1Error.Create('ParseName: node is not SEQUENCE (Name)');
+    for i := 0 to Node.ChildCount - 1 do
     begin
-      atavNode := rdnNode.ChildAt(j);  { SEQUENCE (OID, value) }
-      if (atavNode.TagNumber <> Ord(atSequence)) or (atavNode.ChildCount < 2) then
-        raise EASN1Error.Create('ParseName: AttributeTypeAndValue < 2 fields');
-      rdn.Add(ReadOID(atavNode.ChildAt(0)), NodeToString(atavNode.ChildAt(1)));
+      rdnNode := Node.ChildAt(i);  { SET OF AttributeTypeAndValue }
+      if (rdnNode.TagClass <> tcUniversal) or (rdnNode.TagNumber <> Ord(atSet)) then
+        raise EASN1Error.Create('ParseName: RDN is not SET');
+      rdn := TRDN.Create;
+      try
+        for j := 0 to rdnNode.ChildCount - 1 do
+        begin
+          atavNode := rdnNode.ChildAt(j);  { SEQUENCE (OID, value) }
+          if (atavNode.TagNumber <> Ord(atSequence)) or (atavNode.ChildCount < 2) then
+            raise EASN1Error.Create('ParseName: AttributeTypeAndValue < 2 fields');
+          rdn.Add(ReadOID(atavNode.ChildAt(0)), NodeToString(atavNode.ChildAt(1)));
+        end;
+        Result.AddRDN(rdn);
+      except
+        rdn.Free;
+        raise;
+      end;
     end;
-    Result.AddRDN(rdn);
+  except
+    Result.Free;
+    Result := nil;
+    raise;
   end;
 end;
 
@@ -320,55 +347,62 @@ var
   keyBytes: TBytes;
 begin
   Result := TSPKI.Create;
-  if (Node = nil) or (Node.TagNumber <> Ord(atSequence)) or (Node.ChildCount < 2) then
-    raise EASN1Error.Create('ParseSPKI: invalid SPKI structure');
-  algNode := Node.ChildAt(0);  { SEQUENCE (OID, params) }
-  if (algNode.TagNumber <> Ord(atSequence)) or (algNode.ChildCount < 1) then
-    raise EASN1Error.Create('ParseSPKI: AlgorithmIdentifier is incorrect');
-  Result.FAlgorithmOID := ReadOID(algNode.ChildAt(0));
-  if algNode.ChildCount >= 2 then
-  begin
-    paramNode := algNode.ChildAt(1);
-    if (paramNode.TagClass = tcUniversal) and
-       (paramNode.TagNumber = Ord(atObjectIdentifier)) then
-      Result.FCurveOID := ReadOID(paramNode);
-  end;
-
-  keyNode := Node.ChildAt(1);  { BIT STRING }
-  if (keyNode.TagClass <> tcUniversal) or (keyNode.TagNumber <> Ord(atBitString)) then
-    raise EASN1Error.Create('ParseSPKI: subjectPublicKey is not BIT STRING');
-  { BIT STRING: [unused_bits][key_bytes] }
-  SetLength(keyBytes, Length(keyNode.Data) - 1);
-  if Length(keyBytes) > 0 then
-    Move(keyNode.Data[1], keyBytes[0], Length(keyBytes));
-  Result.FKeyBytes := keyBytes;
-
-  case Result.FAlgorithmOID of
-    '1.2.840.113549.1.1.1': Result.FKeyType := pkRSA;
-    '1.2.840.10045.2.1':    Result.FKeyType := pkEC;
-    '1.2.840.113549.1.3.1': Result.FKeyType := pkDH;
-  else
-    Result.FKeyType := pkUnknown;
-  end;
-
-  if Result.FKeyType = pkRSA then
-  begin
-    { RSAPublicKey ::= SEQUENCE (modulus INTEGER, publicExponent INTEGER) }
-    rsaNode := ParseDER(Result.FKeyBytes);
-    try
-      if (rsaNode.TagNumber <> Ord(atSequence)) or (rsaNode.ChildCount < 2) then
-        raise EASN1Error.Create('ParseSPKI: RSAPublicKey is incorrect');
-      Result.FRSAN := ReadInteger(rsaNode.ChildAt(0));
-      Result.FRSANE := ReadInteger(rsaNode.ChildAt(1));
-    finally
-      rsaNode.Free;
+  { As in ParseName: the object is handed over only on success. }
+  try
+    if (Node = nil) or (Node.TagNumber <> Ord(atSequence)) or (Node.ChildCount < 2) then
+      raise EASN1Error.Create('ParseSPKI: invalid SPKI structure');
+    algNode := Node.ChildAt(0);  { SEQUENCE (OID, params) }
+    if (algNode.TagNumber <> Ord(atSequence)) or (algNode.ChildCount < 1) then
+      raise EASN1Error.Create('ParseSPKI: AlgorithmIdentifier is incorrect');
+    Result.FAlgorithmOID := ReadOID(algNode.ChildAt(0));
+    if algNode.ChildCount >= 2 then
+    begin
+      paramNode := algNode.ChildAt(1);
+      if (paramNode.TagClass = tcUniversal) and
+         (paramNode.TagNumber = Ord(atObjectIdentifier)) then
+        Result.FCurveOID := ReadOID(paramNode);
     end;
-  end
-  else if Result.FKeyType = pkEC then
-  begin
-    Result.FCurve := CurveFromOID(Result.FCurveOID);
-    if Result.FCurve <> nil then
-      Result.FPoint := DecodePoint(Result.FCurve, Result.FKeyBytes);
+
+    keyNode := Node.ChildAt(1);  { BIT STRING }
+    if (keyNode.TagClass <> tcUniversal) or (keyNode.TagNumber <> Ord(atBitString)) then
+      raise EASN1Error.Create('ParseSPKI: subjectPublicKey is not BIT STRING');
+    { BIT STRING: [unused_bits][key_bytes] }
+    SetLength(keyBytes, Length(keyNode.Data) - 1);
+    if Length(keyBytes) > 0 then
+      Move(keyNode.Data[1], keyBytes[0], Length(keyBytes));
+    Result.FKeyBytes := keyBytes;
+
+    case Result.FAlgorithmOID of
+      '1.2.840.113549.1.1.1': Result.FKeyType := pkRSA;
+      '1.2.840.10045.2.1':    Result.FKeyType := pkEC;
+      '1.2.840.113549.1.3.1': Result.FKeyType := pkDH;
+    else
+      Result.FKeyType := pkUnknown;
+    end;
+
+    if Result.FKeyType = pkRSA then
+    begin
+      { RSAPublicKey ::= SEQUENCE (modulus INTEGER, publicExponent INTEGER) }
+      rsaNode := ParseDER(Result.FKeyBytes);
+      try
+        if (rsaNode.TagNumber <> Ord(atSequence)) or (rsaNode.ChildCount < 2) then
+          raise EASN1Error.Create('ParseSPKI: RSAPublicKey is incorrect');
+        Result.FRSAN := ReadInteger(rsaNode.ChildAt(0));
+        Result.FRSANE := ReadInteger(rsaNode.ChildAt(1));
+      finally
+        rsaNode.Free;
+      end;
+    end
+    else if Result.FKeyType = pkEC then
+    begin
+      Result.FCurve := CurveFromOID(Result.FCurveOID);
+      if Result.FCurve <> nil then
+        Result.FPoint := DecodePoint(Result.FCurve, Result.FKeyBytes);
+    end;
+  except
+    Result.Free;
+    Result := nil;
+    raise;
   end;
 end;
 
@@ -657,7 +691,7 @@ begin
         Result.IsCA := node.ChildAt(0).Data[0] <> 0;
     end;
     if node.ChildCount > 1 then
-      Result.PathLen := BNToLongInt(ReadInteger(node.ChildAt(1)));
+      Result.PathLen := ReadIntegerAsLongInt(node.ChildAt(1));
   finally
     node.Free;
   end;
@@ -822,127 +856,143 @@ var
   ext: TX509Extension;
 begin
   Result := TX509Cert.Create;
-  tree := ParseDER(der);
+  {' The certificate object is built field by field; on any error it must not
+    escape: free it and re-raise, otherwise a malformed certificate leaks a
+    TX509Cert (and everything parsed into it so far). }
   try
-    certNode := tree;  { SEQUENCE (tbs, sigAlg, sig) }
-    if (certNode.TagClass <> tcUniversal) or
-       (certNode.TagNumber <> Ord(atSequence)) or (certNode.ChildCount < 3) then
-      raise EASN1Error.Create('ParseCertificate: root is not Certificate SEQUENCE');
-    tbsNode := certNode.ChildAt(0);
-    sigNode := certNode.ChildAt(2);
+    tree := ParseDER(der);
+    try
+      certNode := tree;  { SEQUENCE (tbs, sigAlg, sig) }
+      if (certNode.TagClass <> tcUniversal) or
+         (certNode.TagNumber <> Ord(atSequence)) or (certNode.ChildCount < 3) then
+        raise EASN1Error.Create('ParseCertificate: root is not Certificate SEQUENCE');
+      tbsNode := certNode.ChildAt(0);
+      sigNode := certNode.ChildAt(2);
 
-    { TBS bytes (for signature verification) — canonical re-encoded DER. }
-    Result.FTBS := EncodeDER(tbsNode);
+      { TBS bytes (for signature verification) — canonical re-encoded DER. }
+      Result.FTBS := EncodeDER(tbsNode);
 
-    { Identification of TBS fields in order (version and uniqueID are optional). }
-    verNode := nil;
-    serialNode := nil;
-    sigAlgTBSNode := nil;
-    issuerNode := nil;
-    validityNode := nil;
-    subjectNode := nil;
-    spkiNode := nil;
-    extNode := nil;
-    seqCount := 0;
-    for i := 0 to tbsNode.ChildCount - 1 do
-    begin
-      child := tbsNode.ChildAt(i);
-      if child.TagClass = tcContextSpecific then
+      { Identification of TBS fields in order (version and uniqueID are optional). }
+      verNode := nil;
+      serialNode := nil;
+      sigAlgTBSNode := nil;
+      issuerNode := nil;
+      validityNode := nil;
+      subjectNode := nil;
+      spkiNode := nil;
+      extNode := nil;
+      seqCount := 0;
+      for i := 0 to tbsNode.ChildCount - 1 do
       begin
-        case child.TagNumber of
-          0: verNode := child;
-          3: extNode := child;
-        end;
-      end
-      else
-      begin
-        if child.TagNumber = Ord(atInteger) then
+        child := tbsNode.ChildAt(i);
+        if child.TagClass = tcContextSpecific then
         begin
-          if serialNode = nil then
-            serialNode := child;
-        end
-        else if child.TagNumber = Ord(atSequence) then
-        begin
-          case seqCount of
-            0: sigAlgTBSNode := child;
-            1: issuerNode := child;
-            2: validityNode := child;
-            3: subjectNode := child;
-            4: spkiNode := child;
+          case child.TagNumber of
+            0: verNode := child;
+            3: extNode := child;
           end;
-          Inc(seqCount);
-        end;
-      end;
-    end;
-
-    if serialNode = nil then
-      raise EASN1Error.Create('ParseCertificate: no serialNumber');
-    if sigAlgTBSNode = nil then
-      raise EASN1Error.Create('ParseCertificate: no signature (TBS)');
-    if issuerNode = nil then
-      raise EASN1Error.Create('ParseCertificate: no issuer');
-    if validityNode = nil then
-      raise EASN1Error.Create('ParseCertificate: no validity');
-    if subjectNode = nil then
-      raise EASN1Error.Create('ParseCertificate: no subject');
-    if spkiNode = nil then
-      raise EASN1Error.Create('ParseCertificate: no subjectPublicKeyInfo');
-
-    { Version: [0] EXPLICIT Version DEFAULT v1. }
-    Result.FVersion := 0;
-    if verNode <> nil then
-      Result.FVersion := BNToLongInt(ReadInteger(verNode.FirstChild));
-
-    Result.FSerialNumber := ReadInteger(serialNode);
-    Result.FSignatureAlgorithm := ReadOID(sigAlgTBSNode.ChildAt(0));
-
-    { Validity: SEQUENCE (notBefore Time, notAfter Time). }
-    if validityNode.ChildCount < 2 then
-      raise EASN1Error.Create('ParseCertificate: validity < 2 fields');
-    Result.FNotBefore := ReadTime(validityNode.ChildAt(0));
-    Result.FNotAfter := ReadTime(validityNode.ChildAt(1));
-
-    Result.FIssuer := ParseName(issuerNode);
-    Result.FSubject := ParseName(subjectNode);
-    Result.FSPKI := ParseSPKI(spkiNode);
-
-    { Extensions: [3] EXPLICIT SEQUENCE OF Extension. }
-    if extNode <> nil then
-    begin
-      extSeq := extNode.FirstChild;
-      if (extSeq = nil) or (extSeq.TagNumber <> Ord(atSequence)) then
-        raise EASN1Error.Create('ParseCertificate: extensions not SEQUENCE');
-      for i := 0 to extSeq.ChildCount - 1 do
-      begin
-        extItem := extSeq.ChildAt(i);  { SEQUENCE (OID, [BOOLEAN], OCTET STRING) }
-        if (extItem.TagNumber <> Ord(atSequence)) or (extItem.ChildCount < 2) then
-          raise EASN1Error.Create('ParseCertificate: Extension invalid');
-        ext := TX509Extension.Create;
-        ext.OID := ReadOID(extItem.ChildAt(0));
-        ext.Critical := False;
-        if extItem.ChildCount = 2 then
-          ext.Value := extItem.ChildAt(1).Data
-        else if extItem.ChildCount = 3 then
-        begin
-          ext.Critical := (extItem.ChildAt(1).TagNumber = Ord(atBoolean)) and
-            (extItem.ChildAt(1).Data[0] <> 0);
-          ext.Value := extItem.ChildAt(2).Data;
         end
         else
-          raise EASN1Error.Create('ParseCertificate: Extension: > 3 fields');
-        SetLength(Result.FExtensions, Length(Result.FExtensions) + 1);
-        Result.FExtensions[Length(Result.FExtensions) - 1] := ext;
+        begin
+          if child.TagNumber = Ord(atInteger) then
+          begin
+            if serialNode = nil then
+              serialNode := child;
+          end
+          else if child.TagNumber = Ord(atSequence) then
+          begin
+            case seqCount of
+              0: sigAlgTBSNode := child;
+              1: issuerNode := child;
+              2: validityNode := child;
+              3: subjectNode := child;
+              4: spkiNode := child;
+            end;
+            Inc(seqCount);
+          end;
+        end;
       end;
-    end;
 
-    { Signature value: BIT STRING. }
-    if (sigNode.TagClass <> tcUniversal) or (sigNode.TagNumber <> Ord(atBitString)) then
-      raise EASN1Error.Create('ParseCertificate: signatureValue not BIT STRING');
-    SetLength(Result.FSignature, Length(sigNode.Data) - 1);
-    if Length(Result.FSignature) > 0 then
-      Move(sigNode.Data[1], Result.FSignature[0], Length(Result.FSignature));
-  finally
-    tree.Free;
+      if serialNode = nil then
+        raise EASN1Error.Create('ParseCertificate: no serialNumber');
+      if sigAlgTBSNode = nil then
+        raise EASN1Error.Create('ParseCertificate: no signature (TBS)');
+      if issuerNode = nil then
+        raise EASN1Error.Create('ParseCertificate: no issuer');
+      if validityNode = nil then
+        raise EASN1Error.Create('ParseCertificate: no validity');
+      if subjectNode = nil then
+        raise EASN1Error.Create('ParseCertificate: no subject');
+      if spkiNode = nil then
+        raise EASN1Error.Create('ParseCertificate: no subjectPublicKeyInfo');
+
+      { Version: [0] EXPLICIT Version DEFAULT v1. }
+      Result.FVersion := 0;
+      if verNode <> nil then
+        Result.FVersion := ReadIntegerAsLongInt(verNode.FirstChild);
+
+      Result.FSerialNumber := ReadInteger(serialNode);
+      Result.FSignatureAlgorithm := ReadOID(sigAlgTBSNode.ChildAt(0));
+
+      { Validity: SEQUENCE (notBefore Time, notAfter Time). }
+      if validityNode.ChildCount < 2 then
+        raise EASN1Error.Create('ParseCertificate: validity < 2 fields');
+      Result.FNotBefore := ReadTime(validityNode.ChildAt(0));
+      Result.FNotAfter := ReadTime(validityNode.ChildAt(1));
+
+      Result.FIssuer := ParseName(issuerNode);
+      Result.FSubject := ParseName(subjectNode);
+      Result.FSPKI := ParseSPKI(spkiNode);
+
+      { Extensions: [3] EXPLICIT SEQUENCE OF Extension. }
+      if extNode <> nil then
+      begin
+        extSeq := extNode.FirstChild;
+        if (extSeq = nil) or (extSeq.TagNumber <> Ord(atSequence)) then
+          raise EASN1Error.Create('ParseCertificate: extensions not SEQUENCE');
+        for i := 0 to extSeq.ChildCount - 1 do
+        begin
+          extItem := extSeq.ChildAt(i);  { SEQUENCE (OID, [BOOLEAN], OCTET STRING) }
+          if (extItem.TagNumber <> Ord(atSequence)) or (extItem.ChildCount < 2) then
+            raise EASN1Error.Create('ParseCertificate: Extension invalid');
+          ext := TX509Extension.Create;
+          try
+            ext.OID := ReadOID(extItem.ChildAt(0));
+            ext.Critical := False;
+            if extItem.ChildCount = 2 then
+              ext.Value := extItem.ChildAt(1).Data
+            else if extItem.ChildCount = 3 then
+            begin
+              ext.Critical := (extItem.ChildAt(1).TagNumber = Ord(atBoolean)) and
+                (extItem.ChildAt(1).Data[0] <> 0);
+              ext.Value := extItem.ChildAt(2).Data;
+            end
+            else
+              raise EASN1Error.Create('ParseCertificate: Extension: > 3 fields');
+            SetLength(Result.FExtensions, Length(Result.FExtensions) + 1);
+            Result.FExtensions[Length(Result.FExtensions) - 1] := ext;
+          except
+            { Not yet in FExtensions: free it here so only the certificate
+              itself remains to be released by the outer handler. }
+            ext.Free;
+            raise;
+          end;
+        end;
+      end;
+
+      { Signature value: BIT STRING. }
+      if (sigNode.TagClass <> tcUniversal) or (sigNode.TagNumber <> Ord(atBitString)) then
+        raise EASN1Error.Create('ParseCertificate: signatureValue not BIT STRING');
+      SetLength(Result.FSignature, Length(sigNode.Data) - 1);
+      if Length(Result.FSignature) > 0 then
+        Move(sigNode.Data[1], Result.FSignature[0], Length(Result.FSignature));
+    finally
+      tree.Free;
+    end;
+  except
+    Result.Free;
+    Result := nil;
+    raise;
   end;
 end;
 

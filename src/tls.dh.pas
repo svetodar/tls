@@ -65,20 +65,30 @@ end;
 
 procedure TDHKey.Generate;
 var
-  Pm2: TBN;
+  Pm2, Two, t: TBN;
 begin
   if (P = nil) or (G = nil) then
     raise EBNError.Create('TDHKey.Generate: P and G not set');
   if Priv <> nil then Priv.Free;
   if Pub <> nil then Pub.Free;
-  { Priv = random(2..P-2) }
-  Pm2 := P.Sub(TBN.FromQWord(2));
+  { Priv = random(2..P-2). Each step produces a new TBN: the previous value
+    is released as soon as it is no longer needed. }
+  Two := TBN.FromQWord(2);
   try
-    Priv := TBN.RandomBits(P.BitLength, @RandomByteGen);
-    Priv := Priv.Modulo(Pm2);
-    Priv := Priv.Add(TBN.FromQWord(2));
+    Pm2 := P.Sub(Two);
+    try
+      Priv := TBN.RandomBits(P.BitLength, @RandomByteGen);
+      t := Priv.Modulo(Pm2);
+      Priv.Free;
+      Priv := t;
+      t := Priv.Add(Two);
+      Priv.Free;
+      Priv := t;
+    finally
+      Pm2.Free;
+    end;
   finally
-    Pm2.Free;
+    Two.Free;
   end;
   { Pub = G^Priv mod P }
   Pub := G.ModPow(Priv, P);
@@ -110,18 +120,33 @@ end;
 
 function TDHKey.ValidatePeerPubFull(const PeerPub: TBN): Boolean;
 var
-  Q, Check: TBN;
+  One, Expo, Q, Check: TBN;
 begin
   if not ValidatePeerPub(PeerPub) then
     Exit(False);
-  { q = (P-1)/2 }
-  Q := P.Sub(TBN.FromQWord(1));
-  Q := Q.ShiftRight(1);
-  { PeerPub^q mod P must be 1 }
-  Check := PeerPub.ModPow(Q, P);
-  Result := Check.Equal(TBN.FromQWord(1));
-  Q.Free;
-  Check.Free;
+  One := TBN.FromQWord(1);
+  try
+    Expo := P.Sub(One);
+    try
+      { q = (P-1)/2 }
+      Q := Expo.ShiftRight(1);
+      try
+        { PeerPub^q mod P must be 1 }
+        Check := PeerPub.ModPow(Q, P);
+        try
+          Result := Check.Equal(One);
+        finally
+          Check.Free;
+        end;
+      finally
+        Q.Free;
+      end;
+    finally
+      Expo.Free;
+    end;
+  finally
+    One.Free;
+  end;
 end;
 
 {--- RFC 3526 groups ---}

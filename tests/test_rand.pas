@@ -197,8 +197,12 @@ begin
     if n > 0 then
     begin
       v := TBN.FromBytes(B, False);
-      AssertTrue(Format('RandomBits(%d) < 2^%d', [n, n]), v.BitLength <= n);
-      AssertTrue(Format('RandomBits(%d): bit %d cleared', [n, n]), not v.BitAt(n));
+      try
+        AssertTrue(Format('RandomBits(%d) < 2^%d', [n, n]), v.BitLength <= n);
+        AssertTrue(Format('RandomBits(%d): bit %d cleared', [n, n]), not v.BitAt(n));
+      finally
+        v.Free;
+      end;
     end;
   end;
 end;
@@ -281,10 +285,18 @@ var
   a, b: TBN;
 begin
   a := TBN.RandomBits(256, @RandomByteGen);
-  b := TBN.RandomBits(256, @RandomByteGen);
-  AssertTrue('RandomBits(256) nonzero', not a.IsZero);
-  AssertTrue('RandomBits(256) <= 256 bits', a.BitLength <= 256);
-  AssertTrue('two values differ', a.Compare(b) <> 0);
+  try
+    b := TBN.RandomBits(256, @RandomByteGen);
+    try
+      AssertTrue('RandomBits(256) nonzero', not a.IsZero);
+      AssertTrue('RandomBits(256) <= 256 bits', a.BitLength <= 256);
+      AssertTrue('two values differ', a.Compare(b) <> 0);
+    finally
+      b.Free;
+    end;
+  finally
+    a.Free;
+  end;
 end;
 
 initialization

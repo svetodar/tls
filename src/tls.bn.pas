@@ -775,13 +775,28 @@ end;
 
 function TBN.NotBits: TBN;
 var
-  mask: TBN;
+  one, pow, mask: TBN;
 begin
-  {Bitwise complement over BitLength bits: 2^BitLength - 1 - self.}
+  {Bitwise complement over BitLength bits: 2^BitLength - 1 - self.
+    Every intermediate TBN is released; they are not owned by Result.}
   if IsZero then
     Exit(TBN.Create);
-  mask := TBN.FromQWord(1).ShiftLeft(BitLength).Sub(TBN.FromQWord(1));
-  Result := mask.Sub(Self);
+  one := TBN.FromQWord(1);
+  try
+    pow := one.ShiftLeft(BitLength);
+    try
+      mask := pow.Sub(one);
+      try
+        Result := mask.Sub(Self);
+      finally
+        mask.Free;
+      end;
+    finally
+      pow.Free;
+    end;
+  finally
+    one.Free;
+  end;
 end;
 
 function TBN.Neg: TBN;

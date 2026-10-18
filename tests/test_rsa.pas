@@ -33,20 +33,38 @@ uses
   SysUtils, tls.rsa, tls.bn, tls.sha2;
 
 procedure TRSATests.TestIsPrime;
+var
+  n: TBN;
+
+  { Builds the candidate, checks it and releases it again: the test must not
+    leave TBN objects behind (the runner is built with heap tracing). }
+  procedure CheckPrime(AValue: QWord; AExpectPrime: Boolean);
+  begin
+    n := TBN.FromQWord(AValue);
+    try
+      if AExpectPrime then
+        Check(IsPrime(n), UIntToStr(AValue) + ' is prime')
+      else
+        Check(not IsPrime(n), UIntToStr(AValue) + ' is not prime');
+    finally
+      n.Free;
+    end;
+  end;
+
 begin
-  Check(IsPrime(TBN.FromQWord(2)), '2 is prime');
-  Check(IsPrime(TBN.FromQWord(3)), '3 is prime');
-  Check(IsPrime(TBN.FromQWord(5)), '5 is prime');
-  Check(IsPrime(TBN.FromQWord(17)), '17 is prime');
-  Check(IsPrime(TBN.FromQWord(97)), '97 is prime');
-  Check(IsPrime(TBN.FromQWord(7919)), '7919 is prime');
-  Check(IsPrime(TBN.FromQWord(104729)), '104729 is prime');
-  Check(not IsPrime(TBN.FromQWord(4)), '4 is not prime');
-  Check(not IsPrime(TBN.FromQWord(9)), '9 is not prime');
-  Check(not IsPrime(TBN.FromQWord(15)), '15 is not prime');
-  Check(not IsPrime(TBN.FromQWord(100)), '100 is not prime');
-  Check(not IsPrime(TBN.FromQWord(561)), '561 (Carmichael) is not prime');
-  Check(not IsPrime(TBN.FromQWord(1729)), '1729 is not prime');
+  CheckPrime(2, True);
+  CheckPrime(3, True);
+  CheckPrime(5, True);
+  CheckPrime(17, True);
+  CheckPrime(97, True);
+  CheckPrime(7919, True);
+  CheckPrime(104729, True);
+  CheckPrime(4, False);
+  CheckPrime(9, False);
+  CheckPrime(15, False);
+  CheckPrime(100, False);
+  CheckPrime(561, False);   { Carmichael number }
+  CheckPrime(1729, False);
 end;
 
 procedure TRSATests.TestGenerateAndRoundTrip;

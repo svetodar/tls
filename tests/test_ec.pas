@@ -63,6 +63,26 @@ begin
   Result := A.X.Equal(B.X) and A.Y.Equal(B.Y);
 end;
 
+{Build a point from two hex coordinates. TECPoint.CreateFromXY clones its
+  arguments, so building the coordinates inline would leak them: the
+  temporaries are created and released here.}
+function PointFromHex(const AX, AY: string): TECPoint;
+var
+  X, Y: TBN;
+begin
+  X := TBN.CreateFromHex(AX);
+  try
+    Y := TBN.CreateFromHex(AY);
+    try
+      Result := TECPoint.CreateFromXY(X, Y);
+    finally
+      Y.Free;
+    end;
+  finally
+    X.Free;
+  end;
+end;
+
 {--- Curve parameters ---}
 
 procedure TECTests.TestP256GeneratorOnCurve;
@@ -163,7 +183,9 @@ begin
     k3 := TBN.FromQWord(3);
     p2 := ScalarMul(curve, k3, curve.G);
     p3 := PointDouble(curve, curve.G);
-    p3 := PointAdd(curve, p3, curve.G);
+    p1 := PointAdd(curve, p3, curve.G);
+    p3.Free;
+    p3 := p1;
     Check(PointsEqual(p2, p3), 'P-256: 3*G == 2*G + G');
     p2.Free;
     p3.Free;
@@ -308,6 +330,7 @@ var
   key: TECKeypair;
   msg, badMsg: TBytes;
   sig, tampered: TECDsaSig;
+  one: TBN;
 begin
   curve := CurveP256;
   try
@@ -323,7 +346,12 @@ begin
     {Signature forgery: S -> S+1 }
     tampered := TECDsaSig.Create;
     tampered.R := sig.R.Clone;
-    tampered.S := sig.S.ModAdd(TBN.FromQWord(1), curve.N);
+    one := TBN.FromQWord(1);
+    try
+      tampered.S := sig.S.ModAdd(one, curve.N);
+    finally
+      one.Free;
+    end;
     Check(not ECDSAVerify(curve, key.PublicKey, msg, tampered),
       'ECDSA: tampered signature rejected');
     tampered.Free;
@@ -371,9 +399,7 @@ begin
   curve := CurveP256;
   try
     {Point (1, 2) does not lie on curve P-256 }
-    badPoint := TECPoint.CreateFromXY(
-      TBN.FromQWord(1),
-      TBN.FromQWord(2));
+    badPoint := PointFromHex('1', '2');
     Check(not IsOnCurve(curve, badPoint), 'P-256: (1,2) not on curve');
     badPoint.Free;
   finally
@@ -396,15 +422,15 @@ begin
     i := TBN.CreateFromHex('C88F01F510D9AC3F70A292DAA2316DE544E9AAB8AFE84049C62A9C57862D1433');
     r := TBN.CreateFromHex('C6EF9C5D78AE012A011164ACB397CE2088685D8F06BF9BE0B283AB46476BEE53');
 
-    expPubA := TECPoint.CreateFromXY(
-      TBN.CreateFromHex('DAD0B65394221CF9B051E1FECA5787D098DFE637FC90B9EF945D0C3772581180'),
-      TBN.CreateFromHex('5271A0461CDB8252D61F1C456FA3E59AB1F45B33ACCF5F58389E0577B8990BB3'));
-    expPubB := TECPoint.CreateFromXY(
-      TBN.CreateFromHex('D12DFB5289C8D4F81208B70270398C342296970A0BCCB74C736FC7554494BF63'),
-      TBN.CreateFromHex('56FBF3CA366CC23E8157854C13C58D6AAC23F046ADA30F8353E74F33039872AB'));
-    expShared := TECPoint.CreateFromXY(
-      TBN.CreateFromHex('D6840F6B42F6EDAFD13116E0E12565202FEF8E9ECE7DCE03812464D04B9442DE'),
-      TBN.CreateFromHex('522BDE0AF0D8585B8DEF9C183B5AE38F50235206A8674ECB5D98EDB20EB153A2'));
+    expPubA := PointFromHex(
+      'DAD0B65394221CF9B051E1FECA5787D098DFE637FC90B9EF945D0C3772581180',
+      '5271A0461CDB8252D61F1C456FA3E59AB1F45B33ACCF5F58389E0577B8990BB3');
+    expPubB := PointFromHex(
+      'D12DFB5289C8D4F81208B70270398C342296970A0BCCB74C736FC7554494BF63',
+      '56FBF3CA366CC23E8157854C13C58D6AAC23F046ADA30F8353E74F33039872AB');
+    expShared := PointFromHex(
+      'D6840F6B42F6EDAFD13116E0E12565202FEF8E9ECE7DCE03812464D04B9442DE',
+      '522BDE0AF0D8585B8DEF9C183B5AE38F50235206A8674ECB5D98EDB20EB153A2');
 
     { pubA = i*G, pubB = r*G }
     pubA := ScalarMul(curve, i, curve.G);
@@ -446,33 +472,27 @@ begin
       '30FAB46CC8DC5060855CC9BDA0AA2942' +
       'E0308312916B8ED2960E4BD55A7448FC');
 
-    expPubA := TECPoint.CreateFromXY(
-      TBN.CreateFromHex(
-        '667842D7D180AC2CDE6F74F37551F557' +
-        '55C7645C20EF73E31634FE72B4C55EE6' +
-        'DE3AC808ACB4BDB4C88732AEE95F41AA'),
-      TBN.CreateFromHex(
-        '9482ED1FC0EEB9CAFC4984625CCFC23F' +
-        '65032149E0E144ADA024181535A0F38E' +
-        'EB9FCFF3C2C947DAE69B4C634573A81C'));
-    expPubB := TECPoint.CreateFromXY(
-      TBN.CreateFromHex(
-        'E558DBEF53EECDE3D3FCCFC1AEA08A89' +
-        'A987475D12FD950D83CFA41732BC509D' +
-        '0D1AC43A0336DEF96FDA41D0774A3571'),
-      TBN.CreateFromHex(
-        'DCFBEC7AACF3196472169E838430367F' +
-        '66EEBE3C6E70C416DD5F0C68759DD1FF' +
-        'F83FA40142209DFF5EAAD96DB9E6386C'));
-    expShared := TECPoint.CreateFromXY(
-      TBN.CreateFromHex(
-        '11187331C279962D93D604243FD592CB' +
-        '9D0A926F422E47187521287E7156C5C4' +
-        'D603135569B9E9D09CF5D4A270F59746'),
-      TBN.CreateFromHex(
-        'A2A9F38EF5CAFBE2347CF7EC24BDD5E6' +
-        '24BC93BFA82771F40D1B65D06256A852' +
-        'C983135D4669F8792F2C1D55718AFBB4'));
+    expPubA := PointFromHex(
+      '667842D7D180AC2CDE6F74F37551F557' +
+      '55C7645C20EF73E31634FE72B4C55EE6' +
+      'DE3AC808ACB4BDB4C88732AEE95F41AA',
+      '9482ED1FC0EEB9CAFC4984625CCFC23F' +
+      '65032149E0E144ADA024181535A0F38E' +
+      'EB9FCFF3C2C947DAE69B4C634573A81C');
+    expPubB := PointFromHex(
+      'E558DBEF53EECDE3D3FCCFC1AEA08A89' +
+      'A987475D12FD950D83CFA41732BC509D' +
+      '0D1AC43A0336DEF96FDA41D0774A3571',
+      'DCFBEC7AACF3196472169E838430367F' +
+      '66EEBE3C6E70C416DD5F0C68759DD1FF' +
+      'F83FA40142209DFF5EAAD96DB9E6386C');
+    expShared := PointFromHex(
+      '11187331C279962D93D604243FD592CB' +
+      '9D0A926F422E47187521287E7156C5C4' +
+      'D603135569B9E9D09CF5D4A270F59746',
+      'A2A9F38EF5CAFBE2347CF7EC24BDD5E6' +
+      '24BC93BFA82771F40D1B65D06256A852' +
+      'C983135D4669F8792F2C1D55718AFBB4');
 
     { pubA = i*G, pubB = r*G }
     pubA := ScalarMul(curve, i, curve.G);
@@ -509,9 +529,9 @@ begin
   try
     { RFC 4754 §8.1: ECDSA P-256, message "abc" }
     w := TBN.CreateFromHex('DC51D3866A15BACDE33D96F992FCA99DA7E6EF0934E7097559C27F1614C88A7F');
-    expPub := TECPoint.CreateFromXY(
-      TBN.CreateFromHex('2442A5CC0ECD015FA3CA31DC8E2BBC70BF42D60CBCA20085E0822CB04235E970'),
-      TBN.CreateFromHex('6FC98BD7E50211A4A27102FA3549DF79EBCB4BF246B80945CDDFE7D509BBFD7D'));
+    expPub := PointFromHex(
+      '2442A5CC0ECD015FA3CA31DC8E2BBC70BF42D60CBCA20085E0822CB04235E970',
+      '6FC98BD7E50211A4A27102FA3549DF79EBCB4BF246B80945CDDFE7D509BBFD7D');
 
     { pub = w*G must match the expected }
     pub := ScalarMul(curve, w, curve.G);
@@ -549,15 +569,13 @@ begin
       '0BEB646634BA87735D77AE4809A0EBEA' +
       '865535DE4C1E1DCB692E84708E81A5AF' +
       '62E528C38B2A81B35309668D73524D9F');
-    expPub := TECPoint.CreateFromXY(
-      TBN.CreateFromHex(
-        '96281BF8DD5E0525CA049C048D345D30' +
-        '82968D10FEDF5C5ACA0C64E6465A97EA' +
-        '5CE10C9DFEC21797415710721F437922'),
-      TBN.CreateFromHex(
-        '447688BA94708EB6E2E4D59F6AB6D7ED' +
-        'FF9301D249FE49C33096655F5D502FAD' +
-        '3D383B91C5E7EDAA2B714CC99D5743CA'));
+    expPub := PointFromHex(
+      '96281BF8DD5E0525CA049C048D345D30' +
+      '82968D10FEDF5C5ACA0C64E6465A97EA' +
+      '5CE10C9DFEC21797415710721F437922',
+      '447688BA94708EB6E2E4D59F6AB6D7ED' +
+      'FF9301D249FE49C33096655F5D502FAD' +
+      '3D383B91C5E7EDAA2B714CC99D5743CA');
 
     { pub = w*G must match the expected }
     pub := ScalarMul(curve, w, curve.G);
