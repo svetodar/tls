@@ -29,7 +29,7 @@ type
 implementation
 
 uses
-  SysUtils, Classes, Process, ssockets, Sockets, BaseUnix,
+  SysUtils, Classes, Process, ssockets, Sockets,
   tls.tls12, tls.prf, tls.rand, tls.sha2, tls.hmac, tls.x509,
   tls.certstore;
 
@@ -91,7 +91,7 @@ begin
       raise Exception.Create('TLS E2E: fpGetSockName() failed');
     Result := ntohs(Addr.sin_port);
   finally
-    fpClose(S);
+    CloseSocket(S);
   end;
 end;
 
