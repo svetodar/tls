@@ -12,6 +12,14 @@ crypto dependencies: no OpenSSL, no libcrypto, no other C library, no `openssl`
 unit from FPC. Everything is implemented in Pascal, on top of the RTL and the
 standard FPC packages only.
 
+The single permitted exception is the Windows system certificate-store API
+(`crypt32.dll`): `tls.certstore` uses it on Windows to enumerate the
+installed `Root` and `CA` certificates. `crypt32.dll` is a system API, not a
+crypto library — it only hands over certificate DER bytes; all parsing and
+verification stays in pure Pascal — so it does not violate the rule above.
+It is the only external call the library makes, and it is guarded by
+`{$ifdef windows}`.
+
 Primary target: **FPC 3.2.2**, plain object Pascal (`{$mode objfpc}{$H+}`), no
 LCL/Lazarus dependency inside the library.
 

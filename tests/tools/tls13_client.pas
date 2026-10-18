@@ -12,8 +12,10 @@ program tls13_client;
     tls13_client <host> [port] [path] [cafile] [--insecure]
     tls13_client example.com 443 / /etc/ssl/certs/ca-certificates.crt
 
-  Without a CA file the well-known system bundles are tried. --insecure
-  disables chain verification (self-signed/openssl s_server only). }
+  Without a CA file the well-known system bundles are tried; on Windows
+  the system certificate store (Root + CA) is used via
+  LoadWindowsSystemStore. --insecure disables chain verification
+  (self-signed/openssl s_server only). }
 
 {$mode objfpc}{$H+}
 
@@ -117,9 +119,9 @@ begin
   ParseArgs;
   if (not Insecure) and (CaFile = '') then
     CaFile := DefaultCaFile;
-  if (not Insecure) and (not FileExists(CaFile)) then
+  if (not Insecure) and (CaFile <> '') and (not FileExists(CaFile)) then
   begin
-    WriteLn(ErrOutput, 'no CA bundle found; use --insecure for a test server');
+    WriteLn(ErrOutput, 'CA bundle not found: ', CaFile);
     Halt(3);
   end;
 
@@ -128,12 +130,24 @@ begin
   Sock.IOTimeout := 15000;
   Transport := TTLSStreamTransport.Create(Sock);
   Store := nil;
+  if (not Insecure) and (CaFile = '') then
+  begin
+{$ifdef windows}
+    {No CA file: use the Windows system certificate store (Root + CA).
+      The caller owns this store and frees it in the finally block.}
+    Store := LoadWindowsSystemStore;
+{$else}
+    WriteLn(ErrOutput, 'no CA bundle found; use --insecure for a test server');
+    Halt(3);
+{$endif}
+  end;
 
   Client := TTLS13Client.Create;
   try
     if not Insecure then
     begin
-      Store := LoadBundle(CaFile);
+      if Store = nil then
+        Store := LoadBundle(CaFile);
       Client.TrustStore := Store;
     end;
 

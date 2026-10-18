@@ -24,9 +24,11 @@ unit tls.tlssocket;
   Registration as the default handler (analogous to initialization in
   opensslsockets): TSSLSocketHandler.SetDefaultHandlerClass(TTLSSocketHandler).
 
-  By default VerifyPeerCert is True: a trust store must be configured (via
-  the TrustStore/TrustStorePath properties or CertificateData.CertCA.FileName)
-  or Connect returns False. Set VerifyPeerCert := False only when the caller
+  By default VerifyPeerCert is True: a trust store is resolved from the
+  TrustStore/TrustStorePath properties or CertificateData.CertCA.FileName,
+  and on Windows falls back to the system certificate store (Root + CA)
+  unless DisableSystemStore is True; if no store can be resolved, Connect
+  returns False. Set VerifyPeerCert := False only when the caller
   intentionally accepts any server certificate. }
 
 {$mode objfpc}{$H+}
@@ -83,10 +85,21 @@ type
       and invokes the inherited OnVerifyCertificate event.}
     function DoVerifyCert: Boolean; override;
   public
+    {When True, disables the automatic fallback to the Windows system
+      certificate store on Windows (see Connect). Default is False.}
+    DisableSystemStore: Boolean;
     constructor Create; override;
     destructor Destroy; override;
     {TCP connection + TLS handshake. Returns True on success. On failure
-      LastErrorString carries a human-readable reason.}
+      LastErrorString carries a human-readable reason.
+
+      Trust store resolution, in order:
+        1. the TrustStore property, if set;
+        2. a bundle loaded from CertificateData.CertCA.FileName;
+        3. on Windows only, the system certificate store (Root + CA) via
+           LoadWindowsSystemStore, unless DisableSystemStore is True.
+      If VerifyPeerCert is True and no store can be resolved, Connect
+      returns False.}
     function Connect: Boolean; override;
     {Closes the TLS connection (sends close_notify).}
     function Close: Boolean; override;
@@ -182,6 +195,7 @@ begin
   FTransport := nil;
   FTrustStore := nil;
   FOwnsTrustStore := False;
+  DisableSystemStore := False;
   FLastErrorString := '';
   {Secure default: verify the server certificate.}
   VerifyPeerCert := True;
@@ -329,6 +343,17 @@ begin
     Store := LoadBundle(CertificateData.CertCA.FileName);
     OwnsLocal := True;
   end;
+{$ifdef windows}
+  {On Windows, when verification is requested and no store is configured,
+    fall back to the system certificate store (Root + CA) unless
+    DisableSystemStore is set. The handler owns the loaded store and
+    frees it below (OwnsLocal).}
+  if VerifyPeerCert and (Store = nil) and not DisableSystemStore then
+  begin
+    Store := LoadWindowsSystemStore;
+    OwnsLocal := True;
+  end;
+{$endif}
 
   if VerifyPeerCert and (Store = nil) then
   begin

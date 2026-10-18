@@ -40,11 +40,17 @@ type
     Reason: string;       { "" if OK, otherwise the failure reason "}
     ChainLen: LongInt;    {' length of the built chain (0 = not built) '}
   end;
+  {' Typed error raised when the Windows system certificate store cannot be
+    opened or enumerated (LoadWindowsSystemStore). '}
+  TWinCertStoreError = class(Exception);
 
   {' Certificate store. '}
   TCertStore = class
   private
     FCerts: array of TX509Cert;
+    {' Certificates the store created itself (parsed from DER) and must
+      free in Destroy. '}
+    FOwnedCerts: array of TX509Cert;
     function GetCount: LongInt;
   public
     constructor Create;
@@ -52,6 +58,9 @@ type
     property Count: LongInt read GetCount;
     {' Add a certificate (the store keeps a reference, does not copy). '}
     procedure Add(const Cert: TX509Cert);
+    {' Add a certificate the store now owns: it is appended to the store
+      and recorded in the owned list, so Destroy will free it. '}
+    procedure AddOwnedCert(const Cert: TX509Cert);
     {' Get certificate by index. '}
     function At(i: LongInt): TX509Cert;
     {' Find a certificate whose Subject matches the name AName. '}
@@ -106,6 +115,14 @@ function LoadPEM(const APath: string): TX509Cert;
   into a new TCertStore. Returns TCertStore (owns memory; caller must Free).
   Errors — EASN1Error. '}
 function LoadBundle(const APath: string): TCertStore;
+{$ifdef windows}
+{' Load the Windows system certificate store (the Root and CA stores of
+  the current user and the local machine) into a new TCertStore.
+  Returns TCertStore (owns memory; caller must Free).
+  Errors — TWinCertStoreError (a store cannot be opened), EASN1Error
+  (a certificate in the store is malformed). '}
+function LoadWindowsSystemStore: TCertStore;
+{$endif windows}
 
 implementation
 
@@ -116,12 +133,19 @@ constructor TCertStore.Create;
 begin
   inherited Create;
   FCerts := nil;
+  FOwnedCerts := nil;
 end;
 
 destructor TCertStore.Destroy;
+var
+  i: LongInt;
 begin
-  {' The store does not own the certificates (keeps references);
-    freeing is the owner's responsibility (see Add). '}
+  {' Free the certificates the store created itself (see AddOwnedCert);
+    the rest are only referenced — freeing them is the owner's
+    responsibility (see Add). '}
+  for i := 0 to Length(FOwnedCerts) - 1 do
+    FOwnedCerts[i].Free;
+  FOwnedCerts := nil;
   FCerts := nil;
   inherited Destroy;
 end;
@@ -135,6 +159,13 @@ procedure TCertStore.Add(const Cert: TX509Cert);
 begin
   SetLength(FCerts, Length(FCerts) + 1);
   FCerts[Length(FCerts) - 1] := Cert;
+end;
+
+procedure TCertStore.AddOwnedCert(const Cert: TX509Cert);
+begin
+  Add(Cert);
+  SetLength(FOwnedCerts, Length(FOwnedCerts) + 1);
+  FOwnedCerts[Length(FOwnedCerts) - 1] := Cert;
 end;
 
 function TCertStore.At(i: LongInt): TX509Cert;
@@ -186,8 +217,14 @@ begin
   end;
 end;
 procedure TCertStore.Clear;
+var
+  i: LongInt;
 begin
-  {Does not own certificates — just resets the list.}
+  { Certificates the store owns are released here; the others are only
+    referenced and stay with their owners (see Add). }
+  for i := 0 to Length(FOwnedCerts) - 1 do
+    FOwnedCerts[i].Free;
+  FOwnedCerts := nil;
   FCerts := nil;
 end;
 
@@ -720,33 +757,207 @@ var
   cert: TX509Cert;
 begin
   Result := TCertStore.Create;
-  sl := TStringList.Create;
+  { Both the store and every certificate parsed into it belong to the
+    caller only on success; on a malformed bundle (or a read error) they are
+    released here, so a failed load leaks neither. }
   try
-    sl.LoadFromFile(APath);
-    content := sl.Text;
-  finally
-    sl.Free;
-  end;
+    sl := TStringList.Create;
+    try
+      sl.LoadFromFile(APath);
+      content := sl.Text;
+    finally
+      sl.Free;
+    end;
 
-  curPos := 1;
-  while curPos <= Length(content) do
-  begin
-    start := Pos(PEM_HDR, Copy(content, curPos, Length(content) - curPos + 1));
-    if start = 0 then Break;
-    start := start + curPos - 1 + Length(PEM_HDR);
+    curPos := 1;
+    while curPos <= Length(content) do
+    begin
+      start := Pos(PEM_HDR, Copy(content, curPos, Length(content) - curPos + 1));
+      if start = 0 then Break;
+      start := start + curPos - 1 + Length(PEM_HDR);
 
-    finish := Pos(PEM_FTR, Copy(content, start, Length(content) - start + 1));
-    if finish = 0 then Break;
-    finish := finish + start - 1;
+      finish := Pos(PEM_FTR, Copy(content, start, Length(content) - start + 1));
+      if finish = 0 then Break;
+      finish := finish + start - 1;
 
-    b64 := Copy(content, start, finish - start);
-    der := Base64Decode(b64);
-    cert := ParseCertificate(der);
-    Result.Add(cert);
+      b64 := Copy(content, start, finish - start);
+      der := Base64Decode(b64);
+      cert := ParseCertificate(der);
+      { The store parsed this certificate itself, so it owns it and frees it
+        in Destroy (or in Clear). }
+      Result.AddOwnedCert(cert);
 
-    curPos := finish + Length(PEM_FTR);
+      curPos := finish + Length(PEM_FTR);
+    end;
+  except
+    Result.Free;
+    Result := nil;
+    raise;
   end;
 end;
 
+{$ifdef windows}
+{--- Windows system store (crypt32.dll) ---}
 
+type
+  {' Opaque handle to a certificate store (HCERTSTORE). '}
+  PCertStore = Pointer;
+  {' Certificate context (CERT_CONTEXT). The encoded (DER) certificate is
+    referenced by pbCertEncoded / cbCertEncoded. '}
+  TCertContext = record
+    dwCertEncodingType: LongWord;
+    pbCertEncoded: Pointer;
+    cbCertEncoded: LongWord;
+    pCertContext: Pointer;
+  end;
+  PCertContext = ^TCertContext;
+
+const
+  CERT_SYSTEM_STORE_CURRENT_USER  = $00000001;
+  CERT_SYSTEM_STORE_LOCAL_MACHINE = $00000002;
+  {' Open both the current-user and the local-machine system stores. '}
+  WinSystemStoreFlags = CERT_SYSTEM_STORE_CURRENT_USER or
+    CERT_SYSTEM_STORE_LOCAL_MACHINE;
+
+function CertOpenStore(lpszStoreName: PAnsiChar;
+  lpszCertEncodingName: PAnsiChar; dwFlags: LongWord; dwReserved: LongWord;
+  pvPara: Pointer): PCertStore;
+  external 'crypt32.dll' name 'CertOpenStore';
+{' Open a system store by name. Used as a fallback when CertOpenStore does
+  not support the CERT_SYSTEM_STORE flags (some builds return
+  ERROR_FILE_NOT_FOUND for them). '}
+function CertOpenSystemStoreW(dwFlags: LongWord;
+  pwszStoreName: PWideChar): PCertStore;
+  external 'crypt32.dll' name 'CertOpenSystemStoreW';
+function CertCloseStore(hCertStore: PCertStore; dwFlags: LongWord): Boolean;
+  external 'crypt32.dll' name 'CertCloseStore';
+function CertEnumCertificatesInStore(hCertStore: PCertStore;
+  pPreviousContext: PCertContext): PCertContext;
+  external 'crypt32.dll' name 'CertEnumCertificatesInStore';
+{' Declared for completeness; the DER bytes are read directly from the
+  CERT_CONTEXT (pbCertEncoded/cbCertEncoded) instead of calling this, so it
+  is never invoked. '}
+function CertGetCertificateContextData(pCertContext: PCertContext;
+  dwCopy: LongWord; pvData: Pointer; pcbData: PLongInt): Boolean;
+  external 'crypt32.dll' name 'CertGetCertificateContextData';
+function CertFreeCertificateContext(pCertContext: PCertContext): Boolean;
+  external 'crypt32.dll' name 'CertFreeCertificateContext';
+
+{' Open a system store (Root/CA) by name, trying the documented
+  CertOpenStore first and falling back to CertOpenSystemStoreW.
+  Returns nil if the store cannot be opened. '}
+function OpenWinSystemStore(const AName: WideString): PCertStore;
+var
+  h: PCertStore;
+begin
+  h := CertOpenStore(nil, nil, WinSystemStoreFlags, 0, PWideChar(AName));
+  if h = nil then
+    h := CertOpenSystemStoreW(WinSystemStoreFlags, PWideChar(AName));
+  Result := h;
+end;
+
+{' Enumerate every certificate in an open system store (hStore), parse each
+  one into a TX509Cert and hand ownership to AStore (AddOwnedCert).
+  Runs in two phases: first every certificate''s DER bytes are copied out of
+  its CERT_CONTEXT and the context is released; only then are the DER bytes
+  parsed. The system stores can be refreshed by crypt32 in the background
+  (for example when a new root CA is installed), so a context must not be
+  held longer than necessary — in particular not across the slow parse.
+  CertEnumCertificatesInStore FREES the context it is given as
+  pPrevCertContext (see its documentation), so the DER bytes are copied
+  before the next context is requested and the loop never calls
+  CertFreeCertificateContext on a context the enumerator already released:
+  doing otherwise corrupts the heap. Only a context still held when the loop
+  is left through an exception is freed here.
+  Raises EASN1Error (from ParseCertificate) on a malformed certificate. '}
+procedure EnumWinStore(hStore: PCertStore; AStore: TCertStore);
+var
+  ctx: PCertContext;
+  p: PByte;
+  der: TBytes;
+  ders: array of TBytes;
+  cert: TX509Cert;
+  i: LongInt;
+begin
+  { Phase 1: copy every certificate''s DER bytes out of its context. }
+  ders := nil;
+  ctx := nil;
+  try
+    ctx := CertEnumCertificatesInStore(hStore, nil);
+    while ctx <> nil do
+    begin
+      SetLength(der, ctx^.cbCertEncoded);
+      if ctx^.cbCertEncoded > 0 then
+      begin
+        p := PByte(ctx^.pbCertEncoded);
+        Move(p^, der[0], ctx^.cbCertEncoded);
+      end;
+      SetLength(ders, Length(ders) + 1);
+      ders[Length(ders) - 1] := der;
+      { The enumerator frees the context passed in and returns the next one,
+        or nil at the end of the store. }
+      ctx := CertEnumCertificatesInStore(hStore, ctx);
+    end;
+  except
+    { Leave the store through an error: release the context that is still
+      held (it has not been handed back to the enumerator yet). }
+    if ctx <> nil then
+      CertFreeCertificateContext(ctx);
+    raise;
+  end;
+
+  { Phase 2: parse the DER bytes (no certificate contexts are involved). }
+  for i := 0 to Length(ders) - 1 do
+  begin
+    cert := ParseCertificate(ders[i]);
+    AStore.AddOwnedCert(cert);
+  end;
+end;
+
+function LoadWindowsSystemStore: TCertStore;
+var
+  rootStore, caStore: PCertStore;
+begin
+  Result := TCertStore.Create;
+  caStore := nil;
+
+  { Open the system Root store (current user + local machine). }
+  rootStore := OpenWinSystemStore('Root');
+  if rootStore = nil then
+  begin
+    Result.Free;
+    raise TWinCertStoreError.Create(
+      'LoadWindowsSystemStore: cannot open the Root store');
+  end;
+
+  { The inner try/except drops the partially filled store and re-raises;
+    the outer finally closes both system stores on every path. The nesting
+    works around an FPC 3.2.2 parser bug: a "raise;" statement directly in
+    an except block followed by "finally" is not parsed. }
+  try
+    try
+      { Open the system CA store (current user + local machine). }
+      caStore := OpenWinSystemStore('CA');
+      if caStore = nil then
+        raise TWinCertStoreError.Create(
+          'LoadWindowsSystemStore: cannot open the CA store');
+
+      { Enumerate both stores; EnumWinStore copies every certificate out of
+        its context, frees the context, and parses the DER bytes. }
+      EnumWinStore(rootStore, Result);
+      EnumWinStore(caStore, Result);
+    except
+      { A store could not be opened, or a certificate is malformed: drop
+        the partially filled store, then re-raise. }
+      Result.Free;
+      raise;
+    end;
+  finally
+    { Close both system stores on every path (success or error). }
+    if caStore <> nil then
+      CertCloseStore(caStore, 0);
+    CertCloseStore(rootStore, 0);
+  end;
+end;
+{$endif windows}
 end.
