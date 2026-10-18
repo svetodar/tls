@@ -150,6 +150,8 @@ end;
 {--- NIST curve parameters ---}
 
 function CurveP256: TECCurve;
+var
+  Gx, Gy: TBN;
 begin
   Result := TECCurve.Create;
   Result.P := TBN.CreateFromHex(
@@ -161,19 +163,31 @@ begin
   Result.B := TBN.CreateFromHex(
     '5AC635D8AA3A93E7B3EBBD55769886BC' +
     '651D06B0CC53B0F63BCE3C3E27D2604B');
-  Result.G := TECPoint.CreateFromXY(
-    TBN.CreateFromHex(
-      '6B17D1F2E12C4247F8BCE6E563A440F2' +
-      '77037D812DEB33A0F4A13945D898C296'),
-    TBN.CreateFromHex(
+  { TECPoint.CreateFromXY clones its arguments, so the temporaries are freed
+    here instead of being leaked once per curve construction. }
+  Gx := TBN.CreateFromHex(
+    '6B17D1F2E12C4247F8BCE6E563A440F2' +
+    '77037D812DEB33A0F4A13945D898C296');
+  try
+    Gy := TBN.CreateFromHex(
       '4FE342E2FE1A7F9B8EE7EB4A7C0F9E16' +
-      '2BCE33576B315ECECBB6406837BF51F5'));
+      '2BCE33576B315ECECBB6406837BF51F5');
+    try
+      Result.G := TECPoint.CreateFromXY(Gx, Gy);
+    finally
+      Gy.Free;
+    end;
+  finally
+    Gx.Free;
+  end;
   Result.N := TBN.CreateFromHex(
     'FFFFFFFF00000000FFFFFFFFFFFFFFFF' +
     'BCE6FAADA7179E84F3B9CAC2FC632551');
 end;
 
 function CurveP384: TECCurve;
+var
+  Gx, Gy: TBN;
 begin
   Result := TECCurve.Create;
   Result.P := TBN.CreateFromHex(
@@ -188,15 +202,23 @@ begin
     'B3312FA7E23EE7E4988E056BE3F82D19' +
     '181D9C6EFE8141120314088F5013875A' +
     'C656398D8A2ED19D2A85C8EDD3EC2AEF');
-  Result.G := TECPoint.CreateFromXY(
-    TBN.CreateFromHex(
-      'AA87CA22BE8B05378EB1C71EF320AD74' +
-      '6E1D3B628BA79B9859F741E082542A38' +
-      '5502F25DBF55296C3A545E3872760AB7'),
-    TBN.CreateFromHex(
+  Gx := TBN.CreateFromHex(
+    'AA87CA22BE8B05378EB1C71EF320AD74' +
+    '6E1D3B628BA79B9859F741E082542A38' +
+    '5502F25DBF55296C3A545E3872760AB7');
+  try
+    Gy := TBN.CreateFromHex(
       '3617DE4A96262C6F5D9E98BF9292DC29' +
       'F8F41DBD289A147CE9DA3113B5F0B8C0' +
-      '0A60B1CE1D7E819D7A431D7C90EA0E5F'));
+      '0A60B1CE1D7E819D7A431D7C90EA0E5F');
+    try
+      Result.G := TECPoint.CreateFromXY(Gx, Gy);
+    finally
+      Gy.Free;
+    end;
+  finally
+    Gx.Free;
+  end;
   Result.N := TBN.CreateFromHex(
     'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' +
     'FFFFFFFFFFFFFFFFC7634D81F4372DDF' +
@@ -308,16 +330,24 @@ end;
 
 function PointNeg(const Curve: TECCurve; const P: TECPoint): TECPoint;
 var
-  NegY: TBN;
+  NegY, Zero: TBN;
 begin
   if P.Infinity then
   begin
     Result := TECPoint.InfinityPoint;
     Exit;
   end;
-  NegY := TBN.CreateFromQWord(0).ModSub(P.Y, Curve.P);
-  Result := TECPoint.CreateFromXY(P.X, NegY);
-  NegY.Free;
+  Zero := TBN.CreateFromQWord(0);
+  try
+    NegY := Zero.ModSub(P.Y, Curve.P);
+  finally
+    Zero.Free;
+  end;
+  try
+    Result := TECPoint.CreateFromXY(P.X, NegY);
+  finally
+    NegY.Free;
+  end;
 end;
 
 function IsOnCurve(const Curve: TECCurve; const P: TECPoint): Boolean;
@@ -604,6 +634,9 @@ begin
     E.Free;
   except
     E.Free;
+    { The partially built signature is not returned to the caller. }
+    Result.Free;
+    Result := nil;
     raise;
   end;
 end;

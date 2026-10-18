@@ -492,58 +492,89 @@ end;
 
 function IsPrime(const N: TBN; Rounds: Integer = 20): Boolean;
 var
-  nMinus1, d: TBN;
+  nMinus1, d, a, x, tmp, One, Two, t: TBN;
   r: LongInt;
-  a, x: TBN;
   i, j: Integer;
-  tmp: TBN;
 begin
-  if N.Compare(TBN.FromQWord(2)) = 0 then
-  begin
-    Result := True;
-    Exit;
-  end;
-  if N.Compare(TBN.FromQWord(2)) < 0 then
-  begin
-    Result := False;
-    Exit;
-  end;
-  if not N.BitAt(0) then
-  begin
-    Result := False;
-    Exit;
-  end;
-  nMinus1 := N.Sub(TBN.FromQWord(1));
-  d := nMinus1.Clone;
-  r := 0;
-  while not d.BitAt(0) do
-  begin
-    d := d.ShiftRight(1);
-    Inc(r);
-  end;
-  for i := 1 to Rounds do
-  begin
-    a := TBN.RandomBits(N.BitLength, @RandomByteGen);
-    a := a.Modulo(nMinus1);
-    if a.Compare(TBN.FromQWord(2)) < 0 then
-      a := a.Add(TBN.FromQWord(2));
-    x := a.ModPow(d, N);
-    if (x.IsZero) or x.Equal(TBN.FromQWord(1)) then
-      Continue;
-    tmp := x.Clone;
-    for j := 1 to r - 1 do
-    begin
-      if tmp.Equal(nMinus1) then
-        Break;
-      tmp := tmp.ModMul(tmp, N);
+  {' Miller–Rabin. Every TBN created here is owned by this function and is
+    released on all paths (including the early exits and the repeat-a-candidate
+    step of the loop). }
+  Two := TBN.FromQWord(2);
+  try
+    if N.Compare(Two) = 0 then
+      Exit(True);
+    if N.Compare(Two) < 0 then
+      Exit(False);
+    if not N.BitAt(0) then
+      Exit(False);
+
+    One := TBN.FromQWord(1);
+    try
+      nMinus1 := N.Sub(One);
+      try
+        d := nMinus1.Clone;
+        try
+          { n-1 = 2^r * d with d odd. }
+          r := 0;
+          while not d.BitAt(0) do
+          begin
+            t := d.ShiftRight(1);
+            d.Free;
+            d := t;
+            Inc(r);
+          end;
+          for i := 1 to Rounds do
+          begin
+            a := TBN.RandomBits(N.BitLength, @RandomByteGen);
+            try
+              t := a.Modulo(nMinus1);
+              a.Free;
+              a := t;
+              if a.Compare(Two) < 0 then
+              begin
+                t := a.Add(Two);
+                a.Free;
+                a := t;
+              end;
+              x := a.ModPow(d, N);
+              try
+                if x.IsZero or x.Equal(One) then
+                  Continue;
+                tmp := x.Clone;
+                try
+                  for j := 1 to r - 1 do
+                  begin
+                    if tmp.Equal(nMinus1) then
+                      Break;
+                    t := tmp.ModMul(tmp, N);
+                    tmp.Free;
+                    tmp := t;
+                  end;
+                  if not tmp.Equal(nMinus1) then
+                    Exit(False);
+                finally
+                  tmp.Free;
+                end;
+              finally
+                x.Free;
+              end;
+            finally
+              a.Free;
+            end;
+          end;
+          Result := True;
+        finally
+          d.Free;
+        end;
+      finally
+        nMinus1.Free;
+      end;
+    finally
+      One.Free;
     end;
-    if not tmp.Equal(nMinus1) then
-    begin
-      Result := False;
-      Exit;
-    end;
+  finally
+    Two.Free;
   end;
-  Result := True;
 end;
 
 constructor TRSAKey.Create;
@@ -579,11 +610,23 @@ end;
 
 class function TRSAKey.FromPublicBytes(const AModulus, AExponent: TBytes;
   ABigEndian: Boolean = True): TRSAKey;
+var
+  ModBN, ExpBN: TBN;
 begin
   if (AModulus = nil) or (AExponent = nil) then
     raise Exception.Create('RSA FromPublicBytes: nil modulus or exponent');
-  Result := FromPublic(TBN.FromBytes(AModulus, ABigEndian),
-    TBN.FromBytes(AExponent, ABigEndian));
+  { FromPublic clones the values, so the temporary TBNs are released here. }
+  ModBN := TBN.FromBytes(AModulus, ABigEndian);
+  try
+    ExpBN := TBN.FromBytes(AExponent, ABigEndian);
+    try
+      Result := FromPublic(ModBN, ExpBN);
+    finally
+      ExpBN.Free;
+    end;
+  finally
+    ModBN.Free;
+  end;
 end;
 
 
@@ -695,43 +738,115 @@ end;
 procedure TRSAKey.Generate(Bits: LongInt);
 var
   primeP, primeQ, modN, phiVal, expE, expD: TBN;
+  pDec, qDec: TBN;
+  One: TBN;
   halfBits: LongInt;
   candidate: TBN;
   loop: LongInt;
+
+  { candidate := random(halfBits) with the top and the bottom bit set, so the
+    result is odd and of full length. A fresh TBN is built each time; the
+    caller releases the previous candidate, so the search loop does not
+    accumulate garbage. }
+  procedure NextCandidate;
+  var
+    TopBit, Rand, Step: TBN;
+  begin
+    TopBit := One.ShiftLeft(halfBits - 1);
+    try
+      Rand := TBN.RandomBits(halfBits, @RandomByteGen);
+      try
+        Step := Rand.OrBits(TopBit);
+        try
+          candidate := Step.OrBits(One);
+        finally
+          Step.Free;
+        end;
+      finally
+        Rand.Free;
+      end;
+    finally
+      TopBit.Free;
+    end;
+  end;
+
 begin
   halfBits := Bits div 2;
+  One := TBN.FromQWord(1);
   expE := TBN.FromQWord(65537);
+  candidate := nil;
+  primeP := nil;
+  primeQ := nil;
 
   loop := 0;
   repeat
-    candidate := TBN.RandomBits(halfBits, @RandomByteGen);
-    candidate := candidate.OrBits(TBN.FromQWord(1).ShiftLeft(halfBits - 1));
-    candidate := candidate.OrBits(TBN.FromQWord(1));
+    if candidate <> nil then
+      candidate.Free;
+    NextCandidate;
     Inc(loop);
     if loop > 10000 then
+    begin
+      candidate.Free;
+      One.Free;
+      expE.Free;
       raise Exception.Create('RSA Generate: cannot find p');
+    end;
   until IsPrime(candidate, 20);
   primeP := candidate;
+  candidate := nil;
 
   loop := 0;
   repeat
-    candidate := TBN.RandomBits(halfBits, @RandomByteGen);
-    candidate := candidate.OrBits(TBN.FromQWord(1).ShiftLeft(halfBits - 1));
-    candidate := candidate.OrBits(TBN.FromQWord(1));
+    if candidate <> nil then
+      candidate.Free;
+    NextCandidate;
     Inc(loop);
     if loop > 10000 then
+    begin
+      candidate.Free;
+      primeP.Free;
+      One.Free;
+      expE.Free;
       raise Exception.Create('RSA Generate: cannot find q');
+    end;
   until IsPrime(candidate, 20);
   primeQ := candidate;
+  candidate := nil;
 
   if primeP.Equal(primeQ) then
+  begin
+    primeP.Free;
+    primeQ.Free;
+    One.Free;
+    expE.Free;
     raise Exception.Create('RSA Generate: p == q');
+  end;
 
   modN := primeP.Mul(primeQ);
-  phiVal := primeP.Sub(TBN.FromQWord(1)).Mul(primeQ.Sub(TBN.FromQWord(1)));
+  { phi = (p-1)(q-1); the two factors are temporaries. }
+  pDec := primeP.Sub(One);
+  try
+    qDec := primeQ.Sub(One);
+    try
+      phiVal := pDec.Mul(qDec);
+    finally
+      qDec.Free;
+    end;
+  finally
+    pDec.Free;
+  end;
+
   expD := expE.ModInverse(phiVal);
+  phiVal.Free;
+  One.Free;
   if expD = nil then
+  begin
+    modN.Free;
+    expE.Free;
+    primeP.Free;
+    primeQ.Free;
     raise Exception.Create('RSA Generate: e not invertible');
+  end;
 
   FN := modN;
   FE := expE;
@@ -747,7 +862,11 @@ var
 begin
   modLen := (FN.BitLength + 7) div 8;
   em := PKCS1v15Encode(Hash, Oid, modLen);
-  Result := PrivateDecrypt(em);
+  try
+    Result := PrivateDecrypt(em);
+  finally
+    em.Free;
+  end;
 end;
 
 function TRSAKey.SignPSS(const Hash: TBytes; SaltLen: Integer = -1): TBN;
@@ -755,7 +874,11 @@ var
   em: TBN;
 begin
   em := PSSEncode(Hash, '1.2.840.113549.1.1.11', SaltLen, FN.BitLength);
-  Result := PrivateDecrypt(em);
+  try
+    Result := PrivateDecrypt(em);
+  finally
+    em.Free;
+  end;
 end;
 
 end.

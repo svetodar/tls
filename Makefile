@@ -26,6 +26,9 @@ EXAMPLEAPP := $(BIN)/https_client$(EXEEXT)
 
 # -O2 -gl: optimisation plus debug information; -Fusrc: unit search path.
 FPCFLAGS := -O2 -gl -Fusrc
+# The test runner is built with heap tracing (-gh) so the Windows
+# LoadWindowsSystemStore leak test can use the heaptrc unit.
+TESTFLAGS := $(FPCFLAGS) -gh
 
 # gmkdir is a cross-platform "mkdir -p" shipped with some FPC builds.
 # On Unix fall back to the system mkdir when it is missing.
@@ -65,7 +68,7 @@ check-no-openssl:
 
 $(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES)
 	@$(GMKDIR) $(TESTLIB) $(BIN)
-	$(FPC) $(FPCFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
+	$(FPC) $(TESTFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
 
 # Regenerate certificate and DER fixtures. Requires `openssl` and `python3`.
 # The key files produced here are git-ignored: they are test data only.
