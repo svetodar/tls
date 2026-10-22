@@ -1,0 +1,10 @@
+# SHA-256 fingerprints (lower-case hex, one per line) of roots that Mozilla's
+# certdata.txt marks as distrusted, so `tools/rootsgen` can set the
+# ROOT_TABLE_TRUST_DISTRUSTED bit for them. '#' starts a comment.
+#
+# The first snapshot is certifi 2026.10.19 `cacert.pem`, which already leaves
+# out every root that is distrusted for TLS servers, so there is nothing to
+# list here yet. When the snapshot is refreshed from Mozilla `certdata.txt`,
+# add the fingerprints of the newly distrusted roots below (and keep the
+# certificates in roots.pem so that the table records the distrust instead of
+# silently dropping them).

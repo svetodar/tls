@@ -22,7 +22,9 @@ In scope:
    EC (NIST P-256/P-384, ECDHE, ECDSA), X25519 (Curve25519), finite-field
    DH (DHE).
 3. **Certificates (layer 2):** ASN.1/DER parser, X.509 v3 parsing, trust
-   store and chain/signature/validity verification.
+   store and chain/signature/validity verification, with trust anchors taken
+   from an explicit store, from a root bundle embedded in the executable or,
+   on Windows, from the system certificate store.
 4. **TLS (layer 3):** a TLS 1.2 client (record layer, handshake, AEAD cipher
    suites) and, as an extension, a TLS 1.3 client.
 5. **Integration (layer 4):** a socket handler compatible with FPC
@@ -39,7 +41,7 @@ Layers, bottom-up; each layer depends only on the ones below it:
 ```
 [0] bn, rand, sha2 -> hmac, aes, chacha20
 [1] rsa, ec, x25519, dh            (use [0])
-[2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
+[2] asn1 -> x509 -> certstore -> roottable -> roots  (verification uses [1] and sha2)
 [3] prf, tls12, tls13              (use everything below)
 [4] socket layer and host integration (planned)
 ```
@@ -75,6 +77,8 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
 | 15 | `15-http.md` | 4 | 14 |
 | 16 | `16-e2e.md` | 4 | 15 |
 | 17 | `17-x25519.md` | 1 | 01, 02 |
+| 18 | `18-windows-default-cert-store.md` | 2, 4 | 10, 11, 14 |
+| 19 | `19-embedded-roots.md` | 2 | 03, 10, 11 |
 
 ## Milestones
 
@@ -87,13 +91,24 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
 - **D — TLS 1.2 (12).** Client handshake and record layer; data can be
   exchanged with a real TLS server (`openssl s_server`, `stunnel` or a mock).
 - **E — integration (14–16).** A complete HTTPS client works without system
-- **E — integration (14–16).** A complete HTTPS client works without system
   OpenSSL; end-to-end tests run against a local server. **Done.**
 - **F — TLS 1.3 (13, 17).** Client-side TLS 1.3 with the 1-RTT handshake,
   HKDF key schedule, AEAD record layer and the X25519, secp256r1 and
   secp384r1 groups; interoperates with `openssl s_server -tls1_3` (all
   three mandatory cipher suites). **Done** (2026-10-12; X25519 added in the
   wip merge, 2026-10-16).
+
+- **G — trust sources (18, 19).** On Windows the system `Root`/`CA` store is
+  the default trust source (`crypt32.dll`, the only external call the library
+  makes), and a SHA-256-checked bundle of the Mozilla roots is linked into the
+  executable instead of being read from a PEM file next to it. The file-based
+  `LoadPEM`/`LoadBundle` path is unchanged. **Done** (2026-10-22) on the
+  Windows FPC 3.2.2 target. Two stages are tracked separately and are not part
+  of this milestone's commit: the Linux verification run (`make roots` with the
+  Linux `fpcres`, then `make test`/`make leaktest`) and the integration into the
+  consuming `subag` project (bump `deps/tls`, make `EmbeddedRoots` the default
+  trust source, drop the "put ca-bundle.pem next to the program" message) — see
+  `docs/tasks/19-embedded-roots.md`, *Follow-up stages*.
 
 ## Risks
 

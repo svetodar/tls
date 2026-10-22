@@ -14,9 +14,10 @@ them.
 | D | TLS 1.2 client (record layer, handshake, AEAD suites) | done |
 | E | integration: TLS socket layer, OpenSSL-free HTTPS client | done |
 | F | TLS 1.3 client (RFC 8446, 1-RTT, HKDF, AEAD-only, X25519) | done |
+| G | trust sources: Windows system store, embedded root bundle | done |
 
-Test suite: `make test` → **316 tests, 0 errors, 0 failures** (Linux,
-FPC 3.2.2); `make check-no-openssl` → no OpenSSL unit references. The
+Test suite: `make test` → **385 tests, 0 errors, 0 failures** (FPC
+3.2.2); `make check-no-openssl` → no OpenSSL unit references. The
 end-to-end tests drive a real `openssl s_server` and are skipped when the
 `openssl` CLI is unavailable; the network-required test to `example.com` only
 runs when `TLS_TEST_NETWORK=1`.
@@ -102,6 +103,103 @@ connect to `example.com:443` with no explicit store; runs only when
 `TLS_TEST_NETWORK=1`). `TestNoTrustStoreFails` sets
 `DisableSystemStore := True` so it still asserts the strict no-store
 failure on every platform.
+
+## Embedded root certificates (task 19)
+
+The Mozilla root program now ships inside the executable. A DER table of
+trusted roots is embedded as an `RT_RCDATA` resource of `tls.roots`, read
+lazily once per process, integrity-checked with SHA-256 and turned into a
+`TCertStore` that `VerifyChain` accepts; the PEM snapshot in `certs/` stays the
+source of truth in git. No external crypto dependency was added — base64, DER
+parsing and SHA-256 were already here — and `fpcres` is needed only by the
+generator, never at run time.
+
+- `tls.certstore` gained the memory readers `LoadPEMFromMemory(text)` and
+  `LoadBundleFromStream(stream)`; `LoadPEM` and `LoadBundle` are now thin file
+  wrappers over them, so a bundle can come from a file, a resource or any
+  `TStream`. Errors stay `EASN1Error`, and a bundle store owns its certificates
+  (`AddOwnedCert`). The spec also listed `LoadBundleFromMemory`; it was not
+  added — a string goes through `LoadBundleFromStream` with a `TStringStream`,
+  and one bundle reader is enough.
+- `TCertStore` lookups are indexed. `Add`/`AddOwnedCert` compute each
+  certificate's lookup keys once — the canonical subject name (lower-case,
+  blanks collapsed; the same `CanonicalSubjectName`/`subjectHash` normalisation)
+  and its SKI as lower-case hex — and keep sorted order arrays, so
+  `FindBySubject`/`FindBySKI` are binary searches that still return the
+  certificate added first. Lookups never write, so a store shared between
+  threads (the embedded roots) can be searched concurrently. `VerifyChain` and
+  its `Reason` texts are untouched, and `test_tlssocket` passes unchanged.
+- `tls.roottable` owns the format: a 48-byte header (`TLSROT`, version, flags,
+  `count`, `snapshotDate` as Unix days, `dataSha256`), 34-byte records
+  (`derOffset`, `derLength`, `subjectHash`, `skiPresent` + 20-byte SKI, trust
+  bits `web`/`email`/`code`/`distrusted`) and then the DER blobs; `dataSha256`
+  covers everything after the header. `DecodeRootTable` validates magic,
+  version, flags, `count` bounds, every offset/length and the record area, and
+  raises the new `ECertBundleError` on the first violated invariant;
+  `CertStoreFromTable`/`BuildCertStore` skip `distrusted` entries — they never
+  become trust anchors — and return a store that owns its certificates.
+- `tools/rootsgen/rootsgen.lpr` reads `certs/roots.pem` with its own PEM
+  splitter and base64 decoder, parses each certificate through `tls.x509`,
+  derives the subject hash, the SKI and the trust byte, sorts records
+  deterministically (`subjectHash`, then SHA-256 of the DER, then PEM order),
+  writes `build/roots/roots.bin` and `build/roots/tlsroots.rc` and calls
+  `fpcres` to produce `src/tlsroots.res`. It needs no openssl, python or
+  network, and two runs on the same inputs are byte-identical.
+- `tls.roots` is the only unit with `{$R tlsroots.res}` and the only one that
+  names the resource (`TLSROOTS`, `RT_RCDATA`). Every read recomputes SHA-256
+  over the payload and compares it with the header digest byte by byte, without
+  an early exit; a mismatch raises `ECertBundleError` ("embedded roots are
+  corrupted") instead of handing out a weaker store. `VerifyEmbeddedRootsSha256`
+  exposes that check so the tests can feed it tampered and truncated bytes,
+  which a resource linked into the executable does not allow. `EmbeddedRoots`
+  is a lazily built, double-checked, thread-safe cache of the decoded table and
+  of the store; `EmbeddedRootsDate` and
+  `EmbeddedRootsIsStale(ANow, AMaxAgeDays = 365)` report the snapshot date and
+  its age (a flag, not an error: a future date is never stale, a negative
+  `AMaxAgeDays` is an `EArgumentOutOfRangeException`); `ReleaseEmbeddedRoots`
+  drops both so that the next call rebuilds them. A failed attempt caches
+  nothing, so the next call retries instead of seeing a half-built store.
+- Pinned by the tests: 120 roots (certifi `2026.10.19`, `certs/roots.pem`
+  238 856 bytes), snapshot date `2026-10-22` (Unix days 20748), table
+  132 677 bytes, `dataSha256 =
+  391521bf207b7891ed90e9a967db17413c728eb2db1bcd0b291978928aad0dec`. ISRG Root
+  X1 is present exactly once (published DER SHA-256 `96bcec…08c6`, SKI
+  `79b459e6…f6e99b6e`) and `VerifyChain(EmbeddedRoots, ISRG Root X1)`
+  succeeds; an RSA chain from `tests/fixtures` verifies only after its CA is
+  added to a small table built from those fixtures, which exercises the reader
+  and the store path end to end.
+- New tests: `tests/test_roottable.pas` (`TRootTableTests`, 27 cases: the valid
+  table, every broken header/record, the `distrusted` filter),
+  `tests/test_roots.pas` (`TRootsTests`, 18 cases: pinned count/date/digest,
+  record layout, ISRG Root X1, fixture chain, staleness, tampered/truncated
+  table through `VerifyEmbeddedRootsSha256`, cache rebuild) and 13
+  memory-reader cases in `tests/test_certverify.pas`.
+- `make roots` is the only step that needs `fpcres`, and it fails early with a
+  message when the tool is missing. Unlike the plan in the task spec, `build`,
+  `test` and `leaktest` do not depend on `src/tlsroots.res`: a fresh checkout
+  runs `make roots` once, or builds with `-dTLS_NO_EMBEDDED_ROOTS`.
+
+### Follow-up stages (tracked separately)
+
+Task 19 was implemented and verified on the Windows x86_64 FPC 3.2.2 target
+only. Two further stages are deliberately **not** part of this work and are
+tracked as separate steps so the commit stays one task:
+
+- **Linux FPC 3.2.2 verification run.** Rebuild the resource with the Linux
+  `fpcres` and run `make roots`, `make test`, `make leaktest` and
+  `make check-no-openssl` on a Linux x86_64 host. The unit-level expectation is
+  that nothing changes: the compiler links `{$R tlsroots.res}` on every FPC
+  target, `RT_RCDATA` comes from `System` there instead of `windows`, and
+  `tls.rand` reads `/dev/urandom`. Two outcomes have to be checked rather than
+  assumed: `src/tlsroots.res` produced by the Linux `fpcres` is byte-identical
+  to the one produced on Windows, and the resource is readable at run time from
+  an ELF executable. If either differs, this note gets the actual numbers.
+- **Integration into the consuming `subag` project** (submodule `deps/tls`).
+  Bump the submodule, make `EmbeddedRoots` the default trust source in the
+  host's TLS setup, remove the "put ca-bundle.pem next to the program" message,
+  and keep the documented order explicit store → embedded roots → OS store →
+  explicit opt-out. That change lives in the host repository and is its own
+  pull request, not a change to this library.
 
 ## Verified vectors
 
@@ -218,6 +316,19 @@ failure on every platform.
 - `ETLS13Error` derives from `ETLS12Error`, so callers may keep catching the
   TLS 1.2 type; every unsupported or malformed input raises it instead of a
   bare `Exception`.
+- `tls.roottable` is bytes-in/structure-out — no file, resource or OS call —
+  and `tls.certstore` stays bundle-format agnostic; the embedded table is
+  reached only through `tls.roots`, the single unit with a `{$R}`. That keeps
+  the byte-level format testable in memory (`TRootTableTests` builds tables by
+  hand) and lets `tools/rootsgen` link the same units without pulling in the
+  resource it produces (the Makefile filters `tls.roots` out of its
+  dependencies).
+- The documented trust-source order is explicit `TrustStore` → embedded roots →
+  OS store → explicit opt-out (`DisableSystemStore`). Only the first and the
+  Windows store are wired into `TTLSSocketHandler` today; using
+  `EmbeddedRoots` as its fallback is a separate host-side step, so a consumer
+  that wants the bundle passes `EmbeddedRoots` as the `TrustStore` (and must
+  not free it).
 
 ## FPC 3.2.2 pitfalls
 
@@ -234,17 +345,42 @@ failure on every platform.
 - A `raise;` statement directly in an `except` block followed by a
   `finally` clause is not parsed; nest the `try/except` inside an outer
   `try/finally` (used in `LoadWindowsSystemStore`).
+- `{$R file.res}` in a unit is a hard compile-time dependency: a missing
+  `.res` is a fatal error, not a link error, so a build of a component that
+  leaves `tls.roots` in the uses clause needs `make roots` first — or
+  `-dTLS_NO_EMBEDDED_ROOTS`, which drops the `{$R}` and makes every embedded
+  roots call raise `ECertBundleError`.
+- `RT_RCDATA` is not defined by `SysUtils`: it comes from `System` on some
+  targets and from `windows` on Windows — `uses Classes, SysUtils {$ifdef
+  windows}, Windows {$endif}` compiles both ways.
+- `TResourceStream.Create(HInstance, 'TLSROOTS', RT_RCDATA)` is how a named
+  `{$R}` entry is read: `RT_RCDATA` is a `PChar`-typed resource type, the
+  name is the string from the `.rc`, and no `MakeIntResource`/numeric id is
+  involved. A missing entry is an `EResNotFound` at run time (hence the typed
+  `ECertBundleError` wrapper), a missing `.res` a compile error.
+- heaptrc's `DumpHeap` walks freed blocks too and faults under FPC 3.2.2 once
+  the memory manager has released a page back to the OS; for a heap-growth
+  check read `GetFPCHeapStatus.CurrHeapUsed` instead (see
+  `TestWinSystemStoreNoLeak`).
 
 ## How to rebuild test data
 
 ```bash
 make test       # build tests and run them
 make fixtures   # regenerate tests/fixtures (needs openssl + python3)
+make roots      # regenerate src/tlsroots.res from certs/ (needs fpcres)
 ```
 
 `make fixtures` needs the OpenSSL 3.5.9 sources in `./OpenSSL/` for the eight
 `openssl_*.der` vectors; without them that step is skipped and the committed
 vectors are kept. See [`openssl-reference.md`](openssl-reference.md).
+
+`make roots` is deterministic and is needed only when the snapshot in `certs/`
+changes or after a fresh checkout: `src/tlsroots.res` is generated and
+git-ignored, and `tls.roots` does not compile without it unless
+`-dTLS_NO_EMBEDDED_ROOTS` is given. `tests/test_roots.pas` pins the resulting
+certificate count, snapshot date and `dataSha256`, so a refreshed snapshot has
+to update those constants in the same commit.
 
 Running the end-to-end tests (TLS 1.2 and 1.3) requires the `*.key` files:
 run `make fixtures` to generate them (the keys are git-ignored). Without them
@@ -265,10 +401,19 @@ Heap tracing is opt-in: `make test` builds the runner without it, while
 `make leaktest` builds `bin/testrunner_leak` with `-gh -dTLS_HEAPTRACE` and
 runs the certificate-verification suite. Tracing a whole run costs too much —
 heaptrc hooks every allocation, and the EC and certificate suites then take
-minutes instead of seconds — so only the leak checks pay for it. The
-`TestWinSystemStoreNoLeak` dump itself is slow (heaptrc walks the whole heap
-twice: about 12 minutes on a desktop with a full Windows root store), which
-is another reason it stays out of `make test`.
+minutes instead of seconds — so only the leak checks pay for it. The second
+reason used to be the dump itself; the next paragraph explains why that is no
+longer the case.
+
+`TestWinSystemStoreNoLeak` used to dump the whole heap; heaptrc walks every
+block it has ever handed out, freed ones included, and dereferences their
+headers, so under FPC 3.2.2 it faults once the memory manager has returned a
+freed page to the OS (the EC suite allocates multi-megabyte buffers, and the
+system store alone allocates for 158 certificates). The walk also took about
+12 minutes with a full Windows root store. The test now compares
+`GetFPCHeapStatus.CurrHeapUsed` before and after repeated
+`LoadWindowsSystemStore` calls: the counter is a number, safe to read at any
+time, and the check takes milliseconds.
 
 Resource handles. `LoadWindowsSystemStore` closes both system stores on every
 path, `LoadPEM`/`LoadBundle` free their `TStringList`, `tls.rand` frees the

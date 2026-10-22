@@ -35,3 +35,12 @@ docs/reference/
 # Editors / OS noise
 .DS_Store
 *.bak
+
+# Embedded root certificates (task 19, docs/tasks/19-embedded-roots.md).
+# The PEM snapshot and its metadata are the committed source of truth, so the
+# global `*.pem` rule above must not hide them. Everything generated from them
+# is a build artefact and is ignored.
+!certs/roots.pem
+certs/roots.bin
+src/tlsroots.res
+build/roots/

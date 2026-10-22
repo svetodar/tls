@@ -4,6 +4,8 @@ unit test_certverify;
 { Certificate chain verification tests (tls.certstore):
   VerifyChain, VerifySignature, CheckValidity, WildcardMatch, CertMatchesHost,
   TCertStore (Add/FindBySubject/FindBySKI/Clear),
+  PEM loading without a file (LoadPEMFromMemory, LoadBundleFromStream) and the
+  file wrappers over it (LoadPEM, LoadBundle),
   LoadWindowsSystemStore (Windows only; skipped on other platforms). }
 
 {$mode objfpc}{$H+}
@@ -61,8 +63,28 @@ type
     procedure TestStoreAddCount;
     procedure TestStoreFindBySubject;
     procedure TestStoreFindBySKI;
+    procedure TestStoreFindBySubjectCanonical;
+    procedure TestStoreFindBySubjectNotFound;
+    procedure TestStoreFindBySubjectInsertionOrder;
+    procedure TestStoreFindBySKINotFound;
+    procedure TestStoreLookupEmptyStore;
+    procedure TestStoreClearDropsIndex;
     procedure TestStoreClear;
     procedure TestStoreAt;
+    { --- PEM from memory and streams (no file access) --- }
+    procedure TestPEMFromMemoryMatchesFile;
+    procedure TestPEMFromMemorySurroundingText;
+    procedure TestPEMFromMemoryNoHeader;
+    procedure TestPEMFromMemoryUnterminated;
+    procedure TestPEMFromMemoryBadBase64;
+    procedure TestLoadPEMFileMatchesMemory;
+    procedure TestBundleFromStreamTwoCerts;
+    procedure TestBundleFromStreamSurroundingText;
+    procedure TestBundleFromStreamNil;
+    procedure TestBundleFromStreamEmpty;
+    procedure TestBundleFromStreamUnterminated;
+    procedure TestBundleFromStreamBadDER;
+    procedure TestLoadBundleFileMatchesStream;
     { --- Windows system store (skipped off-Windows) --- }
     procedure TestWinSystemStoreNonEmpty;
     procedure TestWinSystemStoreKnownRoot;
@@ -73,14 +95,7 @@ implementation
 
 uses
   SysUtils, Classes, DateUtils,
-{$ifdef TLS_HEAPTRACE}
-  { Heap tracing is only linked in when the runner is built with
-    -dTLS_HEAPTRACE (`make leaktest`): heaptrc slows every allocation down,
-    so it stays out of the normal `make test` run. }
-  heaptrc,
-{$endif}
   tls.asn1, tls.x509, tls.certstore;
-
 {--- Helper functions ---}
 
 function LoadFixture(const Name: string): TBytes;
@@ -118,6 +133,180 @@ begin
   { The store parsed nothing itself here, so it is told to own the
     certificate: Destroy frees it together with the store. }
   Result.AddOwnedCert(ca);
+end;
+
+{--- PEM helpers ---}
+
+{' Standard base64 (RFC 4648 §4) with padding. The library only decodes base64
+  (Base64Decode is private to tls.certstore), so the tests need their own
+  encoder to turn fixture DER into PEM text. '}
+function Base64EncodeBytes(const AData: TBytes): string;
+const
+  Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+var
+  i, n: LongInt;
+  b0, b1, b2: Byte;
+begin
+  Result := '';
+  n := Length(AData);
+  i := 0;
+  while i + 2 < n do
+  begin
+    b0 := AData[i];
+    b1 := AData[i + 1];
+    b2 := AData[i + 2];
+    Result := Result + Alphabet[(b0 shr 2) + 1] +
+      Alphabet[(((b0 and $03) shl 4) or (b1 shr 4)) + 1] +
+      Alphabet[(((b1 and $0F) shl 2) or (b2 shr 6)) + 1] +
+      Alphabet[(b2 and $3F) + 1];
+    Inc(i, 3);
+  end;
+  case n - i of
+    1:
+      begin
+        b0 := AData[i];
+        Result := Result + Alphabet[(b0 shr 2) + 1] +
+          Alphabet[((b0 and $03) shl 4) + 1] + '==';
+      end;
+    2:
+      begin
+        b0 := AData[i];
+        b1 := AData[i + 1];
+        Result := Result + Alphabet[(b0 shr 2) + 1] +
+          Alphabet[(((b0 and $03) shl 4) or (b1 shr 4)) + 1] +
+          Alphabet[((b1 and $0F) shl 2) + 1] + '=';
+      end;
+  end;
+end;
+
+{' Wrap DER bytes into a PEM CERTIFICATE block with 64-character lines,
+  the same shape certifi / OpenSSL bundles use. '}
+function PEMFromDER(const ADER: TBytes): RawByteString;
+const
+  Header = '-----BEGIN CERTIFICATE-----';
+  Footer = '-----END CERTIFICATE-----';
+  ChunkLen = 64;
+var
+  b64, text: string;
+  i: LongInt;
+begin
+  b64 := Base64EncodeBytes(ADER);
+  text := Header + #13#10;
+  i := 1;
+  while i <= Length(b64) do
+  begin
+    text := text + Copy(b64, i, ChunkLen) + #13#10;
+    Inc(i, ChunkLen);
+  end;
+  text := text + Footer + #13#10;
+  Result := text;
+end;
+
+{ PEM text for a DER fixture. }
+function FixturePEM(const Name: string): RawByteString;
+begin
+  Result := PEMFromDER(LoadFixture(Name));
+end;
+
+{' Parse PEM text held in memory through a TMemoryStream, so the test exercises
+  the stream entry point without touching the file system. '}
+function BundleFromText(const AText: RawByteString): TCertStore;
+var
+  ms: TMemoryStream;
+begin
+  ms := TMemoryStream.Create;
+  try
+    if Length(AText) > 0 then
+      ms.WriteBuffer(AText[1], Length(AText));
+    ms.Position := 0;
+    Result := LoadBundleFromStream(ms);
+  finally
+    ms.Free;
+  end;
+end;
+
+{' True if LoadPEMFromMemory rejects AText with EASN1Error (the message is
+  returned in AMessage). A certificate returned by mistake is freed here, so
+  the helper leaks nothing on either outcome. '}
+function PEMFromTextFails(const AText: RawByteString;
+  out AMessage: string): Boolean;
+var
+  cert: TX509Cert;
+begin
+  Result := False;
+  AMessage := '';
+  cert := nil;
+  try
+    try
+      cert := LoadPEMFromMemory(AText);
+    except
+      on E: EASN1Error do
+      begin
+        Result := True;
+        AMessage := E.Message;
+      end;
+    end;
+  finally
+    cert.Free;
+  end;
+end;
+
+{' True if LoadBundleFromStream rejects AText with EASN1Error (see
+  PEMFromTextFails for the ownership rules). '}
+function BundleFromTextFails(const AText: RawByteString;
+  out AMessage: string): Boolean;
+var
+  store: TCertStore;
+begin
+  Result := False;
+  AMessage := '';
+  store := nil;
+  try
+    try
+      store := BundleFromText(AText);
+    except
+      on E: EASN1Error do
+      begin
+        Result := True;
+        AMessage := E.Message;
+      end;
+    end;
+  finally
+    store.Free;
+  end;
+end;
+
+{' Write AText into a file under the temporary directory and return its path;
+  the caller removes the file. Used to check that LoadPEM / LoadBundle really
+  delegate to the in-memory parsers. '}
+function WriteTempPEM(const AName: string; const AText: RawByteString): string;
+var
+  fs: TFileStream;
+begin
+  Result := IncludeTrailingPathDelimiter(GetTempDir) + AName;
+  DeleteFile(Result);
+  fs := TFileStream.Create(Result, fmCreate);
+  try
+    if Length(AText) > 0 then
+      fs.WriteBuffer(AText[1], Length(AText));
+  finally
+    fs.Free;
+  end;
+end;
+
+function SameBytes(const A, B: TBytes): Boolean;
+var
+  i: LongInt;
+begin
+  Result := Length(A) = Length(B);
+  if not Result then
+    Exit;
+  for i := 0 to High(A) do
+    if A[i] <> B[i] then
+    begin
+      Result := False;
+      Exit;
+    end;
 end;
 
 {--- VerifyChain: successful chains ---}
@@ -722,6 +911,126 @@ begin
   end;
 end;
 
+procedure TCertVerifyTests.TestStoreFindBySubjectCanonical;
+var
+  store: TCertStore;
+  ca: TX509Cert;
+  name: string;
+  found: TX509Cert;
+begin
+  store := MakeStore('ca_rsa.der');
+  ca := ParseFixture('ca_rsa.der');
+  try
+    name := ca.Subject.ToNameString;
+    { The subject index is keyed by CanonicalSubjectName, so case and blank
+      runs do not matter (RFC 5280 §7.1). }
+    found := store.FindBySubject(UpperCase(name));
+    AssertNotNull('case-insensitive', found);
+    AssertEquals('same subject', name, found.Subject.ToNameString);
+    found := store.FindBySubject('   ' + name + '   ');
+    AssertNotNull('surrounding blanks', found);
+    found := store.FindBySubject(StringReplace(name, ' ', '   ', [rfReplaceAll]));
+    AssertNotNull('extra inner blanks', found);
+  finally
+    ca.Free;
+    store.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestStoreFindBySubjectNotFound;
+var
+  store: TCertStore;
+begin
+  store := MakeStore('ca_rsa.der');
+  try
+    AssertNull('unknown subject', store.FindBySubject('CN=nothing like it'));
+    AssertNull('empty name', store.FindBySubject(''));
+  finally
+    store.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestStoreFindBySubjectInsertionOrder;
+var
+  store: TCertStore;
+  ca1, ca2: TX509Cert;
+begin
+  store := TCertStore.Create;
+  ca1 := ParseFixture('ca_rsa.der');
+  ca2 := ParseFixture('ca_rsa.der');
+  try
+    store.Add(ca1);
+    store.Add(ca2);
+    { Equal keys keep the insertion order: the old linear scan returned the
+      first certificate added, and so does the index. }
+    AssertTrue('first added wins by subject',
+      store.FindBySubject(ca1.Subject.ToNameString) = ca1);
+    AssertTrue('first added wins by SKI',
+      store.FindBySKI(ca1.GetSubjectKeyIdentifier) = ca1);
+  finally
+    store.Free;
+    ca1.Free;
+    ca2.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestStoreFindBySKINotFound;
+var
+  store: TCertStore;
+  other: TBytes;
+begin
+  store := MakeStore('ca_rsa.der');
+  try
+    SetLength(other, 20);
+    FillChar(other[0], 20, $AA);
+    AssertNull('unknown SKI', store.FindBySKI(other));
+    AssertNull('empty SKI', store.FindBySKI(nil));
+    SetLength(other, 19);
+    FillChar(other[0], 19, $AA);
+    AssertNull('SKI of another length', store.FindBySKI(other));
+  finally
+    store.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestStoreLookupEmptyStore;
+var
+  store: TCertStore;
+begin
+  store := TCertStore.Create;
+  try
+    AssertNull('empty store, by subject', store.FindBySubject('CN=x'));
+    AssertNull('empty store, by SKI', store.FindBySKI(nil));
+  finally
+    store.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestStoreClearDropsIndex;
+var
+  store: TCertStore;
+  ca: TX509Cert;
+  name: string;
+begin
+  store := TCertStore.Create;
+  ca := ParseFixture('ca_rsa.der');
+  try
+    name := ca.Subject.ToNameString;
+    store.Add(ca);
+    AssertNotNull('before clear', store.FindBySubject(name));
+    store.Clear;
+    AssertNull('after clear, by subject', store.FindBySubject(name));
+    AssertNull('after clear, by SKI', store.FindBySKI(ca.GetSubjectKeyIdentifier));
+    { The store is usable again after Clear and rebuilds its index. }
+    store.Add(ca);
+    AssertTrue('re-added certificate is found',
+      store.FindBySubject(name) = ca);
+  finally
+    store.Free;
+    ca.Free;
+  end;
+end;
+
 procedure TCertVerifyTests.TestStoreClear;
 var
   store: TCertStore;
@@ -763,6 +1072,257 @@ begin
     ca1.Free;
     ca2.Free;
     store.Free;
+  end;
+end;
+
+{--- PEM from memory and streams (no file access) ---}
+
+procedure TCertVerifyTests.TestPEMFromMemoryMatchesFile;
+var
+  fromMem, fromDer: TX509Cert;
+begin
+  { The DER fixture is turned into PEM text in the test, so the comparison does
+    not depend on any PEM file on disk. }
+  fromMem := nil;
+  fromDer := ParseFixture('ca_rsa.der');
+  try
+    fromMem := LoadPEMFromMemory(FixturePEM('ca_rsa.der'));
+    AssertNotNull('certificate parsed from memory', fromMem);
+    AssertEquals('subject matches the DER fixture',
+      fromDer.Subject.ToNameString, fromMem.Subject.ToNameString);
+    AssertTrue('SKI matches the DER fixture',
+      SameBytes(fromDer.GetSubjectKeyIdentifier,
+        fromMem.GetSubjectKeyIdentifier));
+  finally
+    fromMem.Free;
+    fromDer.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestPEMFromMemorySurroundingText;
+var
+  fromMem, fromDer: TX509Cert;
+  text: RawByteString;
+begin
+  { Certificate dumps (certifi, the Windows store export) put comments around
+    the block; the parser must pick the block and ignore the surrounding text. }
+  text := '# local trust anchor' + #13#10 + FixturePEM('ca_ec.der') +
+    'trailing text' + #13#10;
+  fromMem := nil;
+  fromDer := ParseFixture('ca_ec.der');
+  try
+    fromMem := LoadPEMFromMemory(text);
+    AssertEquals('block found despite surrounding text',
+      fromDer.Subject.ToNameString, fromMem.Subject.ToNameString);
+  finally
+    fromMem.Free;
+    fromDer.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestPEMFromMemoryNoHeader;
+var
+  msg: string;
+begin
+  AssertTrue('text without a PEM block is rejected',
+    PEMFromTextFails('no PEM here' + #13#10, msg));
+  AssertTrue('message names the missing header',
+    Pos('begin certificate', LowerCase(msg)) > 0);
+end;
+
+procedure TCertVerifyTests.TestPEMFromMemoryUnterminated;
+var
+  text: RawByteString;
+  p: LongInt;
+  msg: string;
+begin
+  { A header with no footer must be an error, never a partial certificate. }
+  text := FixturePEM('ca_rsa.der');
+  p := Pos('-----END CERTIFICATE-----', text);
+  AssertTrue('fixture PEM text has a footer', p > 0);
+  text := Copy(text, 1, p - 1);
+  AssertTrue('block without a footer is rejected',
+    PEMFromTextFails(text, msg));
+  AssertTrue('message names the missing footer',
+    Pos('end certificate', LowerCase(msg)) > 0);
+end;
+
+procedure TCertVerifyTests.TestPEMFromMemoryBadBase64;
+var
+  text: RawByteString;
+  msg: string;
+begin
+  text := '-----BEGIN CERTIFICATE-----' + #13#10 + '!!!!' + #13#10 +
+    '-----END CERTIFICATE-----' + #13#10;
+  AssertTrue('invalid base64 is rejected', PEMFromTextFails(text, msg));
+  AssertTrue('message names base64', Pos('base64', LowerCase(msg)) > 0);
+end;
+
+procedure TCertVerifyTests.TestLoadPEMFileMatchesMemory;
+var
+  tmpFile: string;
+  text: RawByteString;
+  fromFile, fromMem: TX509Cert;
+begin
+  { LoadPEM is a thin wrapper over LoadPEMFromMemory: both must yield the same
+    certificate for the same bytes. }
+  text := FixturePEM('ca_rsa.der');
+  tmpFile := WriteTempPEM('tls_test_ca_rsa.pem', text);
+  fromFile := nil;
+  fromMem := nil;
+  try
+    fromMem := LoadPEMFromMemory(text);
+    fromFile := LoadPEM(tmpFile);
+    AssertEquals('LoadPEM delegates to the in-memory parser',
+      fromMem.Subject.ToNameString, fromFile.Subject.ToNameString);
+    AssertTrue('SKI matches',
+      SameBytes(fromMem.GetSubjectKeyIdentifier,
+        fromFile.GetSubjectKeyIdentifier));
+  finally
+    fromMem.Free;
+    fromFile.Free;
+    DeleteFile(tmpFile);
+  end;
+end;
+
+procedure TCertVerifyTests.TestBundleFromStreamTwoCerts;
+var
+  store: TCertStore;
+  leaf, caRsa, caEc: TX509Cert;
+  bundle: RawByteString;
+  res: TVerifyResult;
+begin
+  bundle := FixturePEM('ca_rsa.der') + FixturePEM('ca_ec.der');
+  store := BundleFromText(bundle);
+  leaf := ParseFixture('leaf_rsa.der');
+  caRsa := ParseFixture('ca_rsa.der');
+  caEc := ParseFixture('ca_ec.der');
+  try
+    AssertEquals('both blocks loaded', 2, store.Count);
+    AssertNotNull('RSA CA found by subject',
+      store.FindBySubject(caRsa.Subject.ToNameString));
+    AssertNotNull('EC CA found by subject',
+      store.FindBySubject(caEc.Subject.ToNameString));
+    { A store built from memory must verify a real fixture chain exactly like a
+      store built from a file. }
+    res := VerifyChain(store, leaf);
+    AssertTrue('chain verifies against the stream-loaded store', res.OK);
+    AssertEquals('chain length', 2, res.ChainLen);
+  finally
+    caEc.Free;
+    caRsa.Free;
+    leaf.Free;
+    store.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestBundleFromStreamSurroundingText;
+var
+  store: TCertStore;
+begin
+  store := BundleFromText('leading comment' + #13#10 +
+    FixturePEM('ca_rsa.der') + 'trailing text' + #13#10);
+  try
+    AssertEquals('one block loaded around text', 1, store.Count);
+  finally
+    store.Free;
+  end;
+end;
+
+procedure TCertVerifyTests.TestBundleFromStreamNil;
+var
+  store: TCertStore;
+  msg: string;
+  raised: Boolean;
+begin
+  store := nil;
+  msg := '';
+  raised := False;
+  try
+    try
+      store := LoadBundleFromStream(nil);
+    except
+      on E: EASN1Error do
+      begin
+        raised := True;
+        msg := E.Message;
+      end;
+    end;
+  finally
+    store.Free;
+  end;
+  AssertTrue('nil stream raises EASN1Error', raised);
+  AssertTrue('message names the nil stream', Pos('nil', LowerCase(msg)) > 0);
+end;
+
+procedure TCertVerifyTests.TestBundleFromStreamEmpty;
+var
+  msg: string;
+begin
+  { An empty store is a mistake, not a result: a bundle without a block must
+    not silently produce a trust store with zero certificates. }
+  AssertTrue('a bundle without certificates is rejected',
+    BundleFromTextFails('no certificates here' + #13#10, msg));
+  AssertTrue('message says no block was found',
+    Pos('no certificate', LowerCase(msg)) > 0);
+end;
+
+procedure TCertVerifyTests.TestBundleFromStreamUnterminated;
+var
+  text: RawByteString;
+  p: LongInt;
+  msg: string;
+begin
+  text := FixturePEM('ca_rsa.der');
+  p := Pos('-----END CERTIFICATE-----', text);
+  AssertTrue('fixture PEM text has a footer', p > 0);
+  text := Copy(text, 1, p - 1);
+  AssertTrue('truncated bundle is rejected', BundleFromTextFails(text, msg));
+  AssertTrue('message says the block is unterminated',
+    Pos('unterminated', LowerCase(msg)) > 0);
+end;
+
+procedure TCertVerifyTests.TestBundleFromStreamBadDER;
+var
+  text: RawByteString;
+  msg: string;
+begin
+  { Valid base64, but the decoded bytes are not a certificate: the DER parser
+    must raise EASN1Error instead of adding a broken certificate. }
+  text := '-----BEGIN CERTIFICATE-----' + #13#10 + 'AAAA' + #13#10 +
+    '-----END CERTIFICATE-----' + #13#10;
+  AssertTrue('garbage DER is rejected', BundleFromTextFails(text, msg));
+  AssertTrue('message comes from the DER parser', msg <> '');
+end;
+
+procedure TCertVerifyTests.TestLoadBundleFileMatchesStream;
+var
+  tmpFile: string;
+  text: RawByteString;
+  store, streamStore: TCertStore;
+  leaf: TX509Cert;
+  res: TVerifyResult;
+begin
+  { LoadBundle opens the file and hands the stream to LoadBundleFromStream: the
+    two entry points must build the same store. }
+  text := FixturePEM('ca_ec.der') + FixturePEM('ca_rsa.der');
+  tmpFile := WriteTempPEM('tls_test_bundle.pem', text);
+  store := nil;
+  streamStore := nil;
+  leaf := nil;
+  try
+    streamStore := BundleFromText(text);
+    store := LoadBundle(tmpFile);
+    AssertEquals('file bundle count', 2, store.Count);
+    AssertEquals('file and stream bundles agree', 2, streamStore.Count);
+    leaf := ParseFixture('leaf_rsa.der');
+    res := VerifyChain(store, leaf);
+    AssertTrue('chain verifies against the file-loaded bundle', res.OK);
+  finally
+    leaf.Free;
+    streamStore.Free;
+    store.Free;
+    DeleteFile(tmpFile);
   end;
 end;
 
@@ -820,36 +1380,19 @@ begin
 end;
 
 {$ifdef TLS_HEAPTRACE}
-{ Read the "unfreed memory blocks" byte count from a heaptrc DumpHeap
-  report file. Returns -1 if the file is missing or the line is absent. }
-function ReadUnfreedBytes(const AFile: string): Int64;
+{ Bytes currently held by the heap, read straight from the RTL heap status.
+  This is deliberately not heaptrc's DumpHeap: DumpHeap walks every block
+  heaptrc has ever handed out, freed ones included, and dereferences their
+  headers. Once the memory manager returns a freed page to the OS (the EC
+  tests allocate multi-megabyte buffers, and LoadWindowsSystemStore allocates
+  for 158 certificates), those headers are gone and the walk faults under
+  FPC 3.2.2. The heap status is a counter, safe to read at any time. }
+function HeapUsedBytes: PtrUInt;
 var
-  sl: TStringList;
-  i, start, colon: Integer;
-  num: string;
+  status: TFPCHeapStatus;
 begin
-  Result := -1;
-  if not FileExists(AFile) then Exit;
-  sl := TStringList.Create;
-  try
-    sl.LoadFromFile(AFile);
-    for i := 0 to sl.Count - 1 do
-    begin
-      start := Pos('unfreed memory blocks : ', sl[i]);
-      if start > 0 then
-      begin
-        Inc(start, Length('unfreed memory blocks : '));
-        colon := start;
-        while (colon <= Length(sl[i])) and (sl[i][colon] <> ' ') do
-          Inc(colon);
-        num := Copy(sl[i], start, colon - start);
-        TryStrToInt64(num, Result);
-        Exit;
-      end;
-    end;
-  finally
-    sl.Free;
-  end;
+  status := GetFPCHeapStatus;
+  Result := status.CurrHeapUsed;
 end;
 {$endif TLS_HEAPTRACE}
 
@@ -859,33 +1402,20 @@ procedure TCertVerifyTests.TestWinSystemStoreNoLeak;
 var
   store: TCertStore;
   i: LongInt;
-  before, after: Int64;
-  tmp, beforeFile, afterFile, sinkFile: string;
+  before, after: PtrUInt;
 {$endif}
 {$endif}
 begin
 {$ifdef windows}
 {$ifdef TLS_HEAPTRACE}
-  { heaptrc (linked in by `make leaktest`) tracks every heap allocation. We
-    compare the bytes held in unfreed blocks before and after repeated
-    LoadWindowsSystemStore calls: a leak would show up as a growing unfreed
-    total. A warm-up load+free runs first so one-time allocations (crypt32
-    load, etc.) happen before the baseline. heaptrc keeps its output file
-    open, so after each DumpHeap the output is re-pointed to a scratch file,
-    which closes the dump before it is read back. }
-  tmp := IncludeTrailingPathDelimiter(GetTempDir);
-  beforeFile := tmp + 'tls_winstore_leak_before.log';
-  afterFile := tmp + 'tls_winstore_leak_after.log';
-  sinkFile := tmp + 'tls_winstore_leak_sink.log';
-  DeleteFile(sinkFile);
+  { Compare the heap in use before and after repeated LoadWindowsSystemStore
+    calls: a leaked store (with its certificates and DER bytes) keeps its
+    memory, so a leak shows up as growth. A warm-up load+free runs first, so
+    one-time allocations (crypt32 load, caches) happen before the baseline. }
   store := LoadWindowsSystemStore;
   store.Free;
 
-  DeleteFile(beforeFile);
-  SetHeapTraceOutput(beforeFile);
-  DumpHeap;
-  SetHeapTraceOutput(sinkFile);
-  before := ReadUnfreedBytes(beforeFile);
+  before := HeapUsedBytes;
 
   for i := 1 to 2 do
   begin
@@ -893,18 +1423,12 @@ begin
     store.Free;
   end;
 
-  DeleteFile(afterFile);
-  SetHeapTraceOutput(afterFile);
-  DumpHeap;
-  SetHeapTraceOutput(sinkFile);
-  after := ReadUnfreedBytes(afterFile);
+  after := HeapUsedBytes;
 
-  AssertTrue('heaptrc baseline captured', before >= 0);
-  AssertTrue('heaptrc after captured', after >= 0);
   { A real leak (an unfreed store or its DER bytes) is far larger than
     this bound; the delta should stay near zero. }
   AssertTrue('no heap growth from repeated LoadWindowsSystemStore',
-    (after - before) < 512 * 1024);
+    Int64(after) - Int64(before) < 512 * 1024);
 {$else}
   { Not built with heap tracing: nothing to measure here, the check runs
     under `make leaktest`. }
@@ -913,6 +1437,7 @@ begin
   { Not on Windows — skipped. }
 {$endif}
 end;
+
 initialization
   RegisterTest(TCertVerifyTests);
 

@@ -1,0 +1,5 @@
+# certs/roots.pem is a verbatim copy of upstream certifi cacert.pem: its bytes
+# are the input of tools/rootsgen and the SHA-256 recorded in certs/README.md
+# is checked against them, so git must not rewrite its line endings on
+# checkout (the repository otherwise runs with core.autocrlf on Windows).
+certs/roots.pem -text
