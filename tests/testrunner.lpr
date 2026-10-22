@@ -22,6 +22,8 @@ uses
   test_tls13,
   test_tls12_e2e,
   test_tls13_e2e,
+  test_roottable,
+  test_roots,
   test_tlssocket;
 
 var

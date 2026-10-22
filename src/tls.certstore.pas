@@ -6,7 +6,12 @@ unit tls.certstore;
   tls.bn (TBN), tls.ec (ECDSA), tls.rsa (RSA), tls.sha2 (SHA-256/384).
 
   TCertStore — collection of certificates with lookup by Subject name and
-    SubjectKeyIdentifier.
+    SubjectKeyIdentifier. Both lookups use a key index that is built as
+    certificates are added (the keys are stored per certificate and sorted
+    once), so a lookup is a binary search instead of a scan over the whole
+    store, which matters for a bundle of ~120 roots and for every hop of
+    VerifyChain. Subject names are compared after CanonicalSubjectName
+    (RFC 5280 §7.1: lower-case, blanks collapsed).
 
   VerifyChain — chain building and verification:
     1. Checks leaf validity periods.
@@ -44,6 +49,11 @@ type
     opened or enumerated (LoadWindowsSystemStore). '}
   TWinCertStoreError = class(Exception);
 
+  {' Order of certificate indexes into a TCertStore certificate list, sorted by
+    a lookup key (insertion order among equal keys). Used by the store's
+    Subject and SubjectKeyIdentifier indexes. '}
+  TCertIndexOrder = array of LongInt;
+
   {' Certificate store. '}
   TCertStore = class
   private
@@ -51,7 +61,27 @@ type
     {' Certificates the store created itself (parsed from DER) and must
       free in Destroy. '}
     FOwnedCerts: array of TX509Cert;
+    {' Lookup index, kept in step with FCerts by Add and dropped by Clear.
+      FSubjectKeys[i] is the canonical subject name of FCerts[i] (see
+      CanonicalSubjectName), FSKIKeys[i] its SubjectKeyIdentifier as
+      lower-case hex, '' when the certificate carries none. FSubjectOrder and
+      FSKIOrder list certificate indexes sorted by the matching key with the
+      insertion order kept among equal keys, so a lookup is a binary search
+      and still yields the certificate added first.
+
+      The keys are computed once, in Add, while the store is being built:
+      lookups never write, so a store that is shared between threads (the
+      embedded roots, for example) can be searched concurrently. '}
+    FSubjectKeys: array of string;
+    FSKIKeys: array of string;
+    FSubjectOrder: TCertIndexOrder;
+    FSKIOrder: TCertIndexOrder;
     function GetCount: LongInt;
+    {' Record the lookup keys of ACert, now at index AIndex of FCerts, and
+      insert that index into the sorted order arrays. '}
+    procedure AddToIndex(const ACert: TX509Cert; AIndex: LongInt);
+    {' Drop the whole lookup index (called by Clear). '}
+    procedure ResetIndex;
   public
     constructor Create;
     destructor Destroy; override;
@@ -63,9 +93,13 @@ type
     procedure AddOwnedCert(const Cert: TX509Cert);
     {' Get certificate by index. '}
     function At(i: LongInt): TX509Cert;
-    {' Find a certificate whose Subject matches the name AName. '}
+    {' Find a certificate whose Subject matches the name AName, compared after
+      CanonicalSubjectName. Returns the first matching certificate in
+      insertion order, nil when nothing matches. '}
     function FindBySubject(const AName: string): TX509Cert;
-    {' Find a certificate by SubjectKeyIdentifier (bytes). '}
+    {' Find a certificate by SubjectKeyIdentifier (bytes, compared by value).
+      Returns the first matching certificate in insertion order, nil for an
+      empty ASKI or when nothing matches. '}
     function FindBySKI(const ASKI: TBytes): TX509Cert;
     {' Remove all certificates (frees memory). '}
     procedure Clear;
@@ -74,6 +108,7 @@ type
 {' Verify the signature of certificate AChild with the public key of AParent.
   Supports RSA (PKCS#1 v1.5) and ECDSA. '}
 function VerifySignature(const AParent, AChild: TX509Cert): Boolean;
+
 
 {' Verify the signature of arbitrary data AMessage with the public key
   of certificate APubKeyCert. AAlgOID — signature algorithm OID
@@ -98,6 +133,14 @@ function WildcardMatch(const Pattern, Host: string): Boolean;
   first SAN (DNS names), then CN (if SAN is absent). '}
 function CertMatchesHost(const Cert: TX509Cert; const Host: string): Boolean;
 
+{' Canonical form of a distinguished name, the basis for comparing the Subject
+  of a stored certificate with the name asked for by FindBySubject (and the
+  Issuer of a certificate with the Subject of its candidate issuer while a
+  chain is built): ASCII letters lower-cased and every run of blanks (space,
+  tab, CR, LF) collapsed to one space, with the ends trimmed — RFC 5280 §7.1
+  compares DirectoryString values case- and blank-insensitively. '}
+function CanonicalSubjectName(const AName: string): string;
+
 {' Build and verify the chain: ALeaf → (intermediates) → CA.
   The store AStore contains the CA and, optionally, intermediate certificates.
   AHops — maximum chain length (default 8).
@@ -105,15 +148,34 @@ function CertMatchesHost(const Cert: TX509Cert; const Host: string): Boolean;
   Returns TVerifyResult. '}
 function VerifyChain(const AStore: TCertStore; const ALeaf: TX509Cert;
   AHops: LongInt = 8; ANow: TDateTime = 0): TVerifyResult;
-{' Load a single PEM certificate from a file.
+{' Parse the first -----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----
+  block of in-memory PEM text and return the certificate (owns memory;
+  the caller must Free). No file or resource access happens here.
+  Errors — EASN1Error (no block, bad base64, malformed DER). '}
+function LoadPEMFromMemory(const APEM: RawByteString): TX509Cert;
+{' Load a single PEM certificate from a file: read the file into memory and
+  hand the text to LoadPEMFromMemory.
   The file must contain a -----BEGIN CERTIFICATE----- ... -----END CERTIFICATE----- block.
   Returns TX509Cert (owns memory; caller must Free).
   Errors — EASN1Error. '}
 function LoadPEM(const APath: string): TX509Cert;
+{' Load a bundle of PEM certificates from a stream into a new TCertStore:
+  the stream is read to the end and every
+  -----BEGIN CERTIFICATE----- ... -----END CERTIFICATE----- block is parsed.
+  The store owns the parsed certificates. No file or resource access happens
+  here.
+  Returns TCertStore (owns memory; caller must Free).
+  Errors — EASN1Error (nil stream, no block, unterminated block, bad base64,
+  malformed DER). '}
+function LoadBundleFromStream(AStream: TStream): TCertStore;
+
 
 {' Load a bundle of PEM certificates (e.g. /etc/ssl/certs/ca-certificates.crt)
-  into a new TCertStore. Returns TCertStore (owns memory; caller must Free).
-  Errors — EASN1Error. '}
+  from a file into a new TCertStore: the file is opened as a stream and
+  handed to LoadBundleFromStream.
+  Returns TCertStore (owns memory; caller must Free).
+  Errors — EASN1Error (read error, no block, unterminated block, bad base64,
+  malformed DER). '}
 function LoadBundle(const APath: string): TCertStore;
 {$ifdef windows}
 {' Load the Windows system certificate store (the Root and CA stores of
@@ -126,6 +188,107 @@ function LoadWindowsSystemStore: TCertStore;
 
 implementation
 
+{--- Lookup index helpers ---}
+
+function CanonicalSubjectName(const AName: string): string;
+var
+  i, Len: LongInt;
+  PendingBlank: Boolean;
+begin
+  { Built in place: the canonical form is never longer than the input. }
+  SetLength(Result, Length(AName));
+  Len := 0;
+  PendingBlank := False;
+  for i := 1 to Length(AName) do
+  begin
+    if AName[i] in [' ', #9, #10, #13] then
+    begin
+      { A blank survives only if something preceded it, so leading and
+        trailing blanks drop out. }
+      if Len > 0 then
+        PendingBlank := True;
+      Continue;
+    end;
+    if PendingBlank then
+    begin
+      Inc(Len);
+      Result[Len] := ' ';
+      PendingBlank := False;
+    end;
+    Inc(Len);
+    Result[Len] := LowerCase(AName[i]);
+  end;
+  SetLength(Result, Len);
+end;
+
+{' Lower-case hex of the bytes: the SubjectKeyIdentifier index key. Two keys
+  are equal exactly when the identifiers are equal byte for byte. '}
+function SKIKeyOf(const ASKI: TBytes): string;
+const
+  HexDigit: array[0..15] of Char = '0123456789abcdef';
+var
+  i: LongInt;
+begin
+  SetLength(Result, Length(ASKI) * 2);
+  for i := 0 to Length(ASKI) - 1 do
+  begin
+    Result[i * 2 + 1] := HexDigit[ASKI[i] shr 4];
+    Result[i * 2 + 2] := HexDigit[ASKI[i] and $0F];
+  end;
+end;
+
+{ First position in AOrder whose key is not less than AKey. }
+function OrderLowerBound(const AOrder: TCertIndexOrder;
+  const AKeys: array of string; const AKey: string): LongInt;
+var
+  Lo, Hi, Mid: LongInt;
+begin
+  Lo := 0;
+  Hi := Length(AOrder);
+  while Lo < Hi do
+  begin
+    Mid := (Lo + Hi) div 2;
+    if AKeys[AOrder[Mid]] < AKey then
+      Lo := Mid + 1
+    else
+      Hi := Mid;
+  end;
+  Result := Lo;
+end;
+
+{ First position in AOrder whose key is greater than AKey. }
+function OrderUpperBound(const AOrder: TCertIndexOrder;
+  const AKeys: array of string; const AKey: string): LongInt;
+var
+  Lo, Hi, Mid: LongInt;
+begin
+  Lo := 0;
+  Hi := Length(AOrder);
+  while Lo < Hi do
+  begin
+    Mid := (Lo + Hi) div 2;
+    if AKeys[AOrder[Mid]] <= AKey then
+      Lo := Mid + 1
+    else
+      Hi := Mid;
+  end;
+  Result := Lo;
+end;
+
+{ Insert the certificate index AIndex into AOrder, keeping it sorted by key
+  and equal keys in insertion order (see OrderUpperBound). }
+procedure InsertOrder(var AOrder: TCertIndexOrder;
+  const AKeys: array of string; AIndex: LongInt);
+var
+  Pos, Tail: LongInt;
+begin
+  Pos := OrderUpperBound(AOrder, AKeys, AKeys[AIndex]);
+  Tail := Length(AOrder) - Pos;
+  SetLength(AOrder, Length(AOrder) + 1);
+  if Tail > 0 then
+    Move(AOrder[Pos], AOrder[Pos + 1], Tail * SizeOf(LongInt));
+  AOrder[Pos] := AIndex;
+end;
 
 {--- TCertStore ---}
 
@@ -134,6 +297,7 @@ begin
   inherited Create;
   FCerts := nil;
   FOwnedCerts := nil;
+  ResetIndex;
 end;
 
 destructor TCertStore.Destroy;
@@ -147,6 +311,7 @@ begin
     FOwnedCerts[i].Free;
   FOwnedCerts := nil;
   FCerts := nil;
+  ResetIndex;
   inherited Destroy;
 end;
 
@@ -155,10 +320,37 @@ begin
   Result := Length(FCerts);
 end;
 
-procedure TCertStore.Add(const Cert: TX509Cert);
+procedure TCertStore.ResetIndex;
 begin
-  SetLength(FCerts, Length(FCerts) + 1);
-  FCerts[Length(FCerts) - 1] := Cert;
+  FSubjectKeys := nil;
+  FSKIKeys := nil;
+  FSubjectOrder := nil;
+  FSKIOrder := nil;
+end;
+
+procedure TCertStore.AddToIndex(const ACert: TX509Cert; AIndex: LongInt);
+begin
+  SetLength(FSubjectKeys, AIndex + 1);
+  SetLength(FSKIKeys, AIndex + 1);
+  FSubjectKeys[AIndex] := '';
+  FSKIKeys[AIndex] := '';
+  if ACert <> nil then
+  begin
+    FSubjectKeys[AIndex] := CanonicalSubjectName(ACert.Subject.ToNameString);
+    FSKIKeys[AIndex] := SKIKeyOf(ACert.GetSubjectKeyIdentifier);
+  end;
+  InsertOrder(FSubjectOrder, FSubjectKeys, AIndex);
+  InsertOrder(FSKIOrder, FSKIKeys, AIndex);
+end;
+
+procedure TCertStore.Add(const Cert: TX509Cert);
+var
+  Index: LongInt;
+begin
+  Index := Length(FCerts);
+  SetLength(FCerts, Index + 1);
+  FCerts[Index] := Cert;
+  AddToIndex(Cert, Index);
 end;
 
 procedure TCertStore.AddOwnedCert(const Cert: TX509Cert);
@@ -177,45 +369,32 @@ end;
 
 function TCertStore.FindBySubject(const AName: string): TX509Cert;
 var
-  i: LongInt;
+  Key: string;
+  Pos: LongInt;
 begin
   Result := nil;
-  for i := 0 to Length(FCerts) - 1 do
-    if FCerts[i].Subject.ToNameString = AName then
-    begin
-      Result := FCerts[i];
-      Exit;
-    end;
+  if Length(FSubjectOrder) = 0 then Exit;
+  Key := CanonicalSubjectName(AName);
+  Pos := OrderLowerBound(FSubjectOrder, FSubjectKeys, Key);
+  if (Pos < Length(FSubjectOrder)) and
+     (FSubjectKeys[FSubjectOrder[Pos]] = Key) then
+    Result := FCerts[FSubjectOrder[Pos]];
 end;
 
 function TCertStore.FindBySKI(const ASKI: TBytes): TX509Cert;
 var
-  i, j: LongInt;
-  ski: TBytes;
-  same: Boolean;
+  Key: string;
+  Pos: LongInt;
 begin
   Result := nil;
   if Length(ASKI) = 0 then Exit;
-  for i := 0 to Length(FCerts) - 1 do
-  begin
-    ski := FCerts[i].GetSubjectKeyIdentifier;
-    if Length(ski) = Length(ASKI) then
-    begin
-      same := True;
-      for j := 0 to Length(ASKI) - 1 do
-        if ski[j] <> ASKI[j] then
-        begin
-          same := False;
-          Break;
-        end;
-      if same then
-      begin
-        Result := FCerts[i];
-        Exit;
-      end;
-    end;
-  end;
+  if Length(FSKIOrder) = 0 then Exit;
+  Key := SKIKeyOf(ASKI);
+  Pos := OrderLowerBound(FSKIOrder, FSKIKeys, Key);
+  if (Pos < Length(FSKIOrder)) and (FSKIKeys[FSKIOrder[Pos]] = Key) then
+    Result := FCerts[FSKIOrder[Pos]];
 end;
+
 procedure TCertStore.Clear;
 var
   i: LongInt;
@@ -226,6 +405,7 @@ begin
     FOwnedCerts[i].Free;
   FOwnedCerts := nil;
   FCerts := nil;
+  ResetIndex;
 end;
 
 {--- Helper functions for VerifySignature ---}
@@ -707,91 +887,205 @@ begin
     SetLength(Result, outPos);
 end;
 
-{--- LoadPEM ---}
+{--- LoadPEMFromMemory ---}
 
-function LoadPEM(const APath: string): TX509Cert;
+function LoadPEMFromMemory(const APEM: RawByteString): TX509Cert;
 const
   PEM_HDR = '-----BEGIN CERTIFICATE-----';
   PEM_FTR = '-----END CERTIFICATE-----';
 var
-  sl: TStringList;
   content: string;
   start, finish: LongInt;
   b64: string;
   der: TBytes;
 begin
-  sl := TStringList.Create;
-  try
-    sl.LoadFromFile(APath);
-    content := sl.Text;
-  finally
-    sl.Free;
-  end;
+  {' The text is treated as raw bytes: PEM is ASCII, so no encoding
+    assumption is needed and a ByteString round-trip stays lossless. '}
+  content := APEM;
 
   start := Pos(PEM_HDR, content);
   if start = 0 then
-    raise EASN1Error.CreateFmt('LoadPEM: BEGIN CERTIFICATE not found in %s', [APath]);
+    raise EASN1Error.Create('LoadPEMFromMemory: BEGIN CERTIFICATE not found');
   start := start + Length(PEM_HDR);
 
   finish := Pos(PEM_FTR, content);
   if (finish = 0) or (finish < start) then
-    raise EASN1Error.CreateFmt('LoadPEM: END CERTIFICATE not found in %s', [APath]);
+    raise EASN1Error.Create('LoadPEMFromMemory: END CERTIFICATE not found');
 
   b64 := Copy(content, start, finish - start);
   der := Base64Decode(b64);
   Result := ParseCertificate(der);
 end;
 
-{--- LoadBundle ---}
+{--- LoadPEM ---}
 
-function LoadBundle(const APath: string): TCertStore;
-const
-  PEM_HDR = '-----BEGIN CERTIFICATE-----';
-  PEM_FTR = '-----END CERTIFICATE-----';
+function LoadPEM(const APath: string): TX509Cert;
 var
   sl: TStringList;
   content: string;
-  curPos, start, finish: LongInt;
-  b64: string;
-  der: TBytes;
-  cert: TX509Cert;
 begin
-  Result := TCertStore.Create;
-  { Both the store and every certificate parsed into it belong to the
-    caller only on success; on a malformed bundle (or a read error) they are
-    released here, so a failed load leaks neither. }
+  {' Reading the file stays here; parsing lives in LoadPEMFromMemory so the
+    same code path serves in-memory PEM (embedded roots). The read error is
+    re-raised as EASN1Error to keep the documented contract. '}
+  sl := TStringList.Create;
   try
-    sl := TStringList.Create;
     try
       sl.LoadFromFile(APath);
-      content := sl.Text;
-    finally
-      sl.Free;
+    except
+      on E: Exception do
+        raise EASN1Error.CreateFmt('LoadPEM: cannot read %s: %s',
+          [APath, E.Message]);
     end;
+    content := sl.Text;
+  finally
+    sl.Free;
+  end;
 
-    curPos := 1;
-    while curPos <= Length(content) do
+  try
+    Result := LoadPEMFromMemory(content);
+  except
+    on E: EASN1Error do
+      raise EASN1Error.CreateFmt('LoadPEM: %s in %s', [E.Message, APath]);
+  end;
+end;
+
+{--- LoadBundle ---}
+
+function LoadBundle(const APath: string): TCertStore;
+var
+  fs: TFileStream;
+begin
+  {' Only the file access lives here; the bundle is parsed by
+    LoadBundleFromStream, so the file, the stream and (later) in-memory
+    bundles share one code path. The read error is re-raised as EASN1Error to
+    keep the documented contract. '}
+  try
+    fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+  except
+    on E: Exception do
+      raise EASN1Error.CreateFmt('LoadBundle: cannot read %s: %s',
+        [APath, E.Message]);
+  end;
+  try
+    try
+      Result := LoadBundleFromStream(fs);
+    except
+      on E: EASN1Error do
+        raise EASN1Error.CreateFmt('LoadBundle: %s in %s', [E.Message, APath]);
+    end;
+  finally
+    fs.Free;
+  end;
+end;
+
+{--- PEM bundle reading (shared by the stream and memory entry points) ---}
+
+const
+  PEMBundleHeader = '-----BEGIN CERTIFICATE-----';
+  PEMBundleFooter = '-----END CERTIFICATE-----';
+
+{' Position of ANeedle in AHaystack at or after AFrom (1-based) or 0 if it
+  does not occur. A local replacement for PosEx, which is not available
+  everywhere, and cheaper than Copy-ing the rest of the text per block. '}
+function FindFrom(const AHaystack, ANeedle: string; AFrom: LongInt): LongInt;
+var
+  i, j, lastStart: LongInt;
+  matched: Boolean;
+begin
+  Result := 0;
+  if (ANeedle = '') or (AFrom < 1) then Exit;
+
+  lastStart := Length(AHaystack) - Length(ANeedle) + 1;
+  i := AFrom;
+  while i <= lastStart do
+  begin
+    if AHaystack[i] = ANeedle[1] then
     begin
-      start := Pos(PEM_HDR, Copy(content, curPos, Length(content) - curPos + 1));
-      if start = 0 then Break;
-      start := start + curPos - 1 + Length(PEM_HDR);
-
-      finish := Pos(PEM_FTR, Copy(content, start, Length(content) - start + 1));
-      if finish = 0 then Break;
-      finish := finish + start - 1;
-
-      b64 := Copy(content, start, finish - start);
-      der := Base64Decode(b64);
-      cert := ParseCertificate(der);
-      { The store parsed this certificate itself, so it owns it and frees it
-        in Destroy (or in Clear). }
-      Result.AddOwnedCert(cert);
-
-      curPos := finish + Length(PEM_FTR);
+      matched := True;
+      for j := 2 to Length(ANeedle) do
+        if AHaystack[i + j - 1] <> ANeedle[j] then
+        begin
+          matched := False;
+          Break;
+        end;
+      if matched then
+        Exit(i);
     end;
+    Inc(i);
+  end;
+end;
+
+{' Parse every PEM certificate block of ABundle and add the certificates to
+  AStore, which takes ownership of them. A bundle that yields no certificate
+  is reported as malformed — an empty trust store is a mistake, not a result,
+  and it must not stay silent. '}
+procedure LoadPEMBundleInto(const ABundle: RawByteString; const AStore: TCertStore);
+var
+  content: string;
+  curPos, start, finish, blocks: LongInt;
+  der: TBytes;
+begin
+  {' The text is treated as raw bytes: PEM is ASCII, so no encoding assumption
+    is needed and a ByteString round-trip stays lossless. '}
+  content := ABundle;
+  curPos := 1;
+  blocks := 0;
+  while True do
+  begin
+    start := FindFrom(content, PEMBundleHeader, curPos);
+    if start = 0 then Break;
+    start := start + Length(PEMBundleHeader);
+
+    finish := FindFrom(content, PEMBundleFooter, start);
+    if finish = 0 then
+      raise EASN1Error.Create('PEM bundle: unterminated CERTIFICATE block');
+
+    der := Base64Decode(Copy(content, start, finish - start));
+    { The store parses this certificate itself, so it owns it and frees it in
+      Destroy (or in Clear). ParseCertificate failing before this line leaves
+      nothing behind to leak. }
+    AStore.AddOwnedCert(ParseCertificate(der));
+    Inc(blocks);
+    curPos := finish + Length(PEMBundleFooter);
+  end;
+
+  if blocks = 0 then
+    raise EASN1Error.Create('PEM bundle: no CERTIFICATE block found');
+end;
+
+{--- LoadBundleFromStream ---}
+
+function LoadBundleFromStream(AStream: TStream): TCertStore;
+var
+  buf: array[0..4095] of Byte;
+  text: RawByteString;
+  n, used: LongInt;
+begin
+  if AStream = nil then
+    raise EASN1Error.Create('LoadBundleFromStream: stream is nil');
+
+  {' Read the whole stream as raw bytes, byte by byte in chunks: PEM has no
+    binary framing, and the reader needs the text as a whole to notice an
+    unterminated block at the end. '}
+  text := '';
+  repeat
+    n := AStream.Read(buf, SizeOf(buf));
+    if n > 0 then
+    begin
+      used := Length(text);
+      SetLength(text, used + n);
+      Move(buf, text[used + 1], n);
+    end;
+  until n <= 0;
+
+  Result := TCertStore.Create;
+  { Both the store and every certificate parsed into it belong to the caller
+    only on success; on a malformed bundle they are released here, so a failed
+    load leaks neither. }
+  try
+    LoadPEMBundleInto(text, Result);
   except
     Result.Free;
-    Result := nil;
     raise;
   end;
 end;

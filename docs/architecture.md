@@ -13,9 +13,16 @@ it:
 [0] bn, rand, sha2 -> hmac, aes, chacha20
 [1] rsa, ec, x25519, dh            (use [0])
 [2] asn1 -> x509 -> certstore      (verification uses [1] and sha2)
+                   roottable -> roots   (embedded root snapshot)
 [3] prf, tls12, tls13              (use everything below)
 [4] tls.tlssocket, examples        (use [3])
 ```
+
+`tls.roottable` sits beside `tls.certstore`: it depends on it (and on
+`tls.x509`), and `tls.roots` depends on `tls.roottable`. Nothing below layer 2
+knows about the root resource, and neither `tls.roottable` nor `tls.roots`
+adds an external dependency — the snapshot is carried inside the executable
+and parsed by this library.
 
 ## Units
 
@@ -33,7 +40,9 @@ it:
 | `tls.dh` | Finite-field Diffie-Hellman (DHE), standard groups. | `tls.bn`, `tls.rand` |
 | `tls.asn1` | ASN.1/DER parser and encoder. | — |
 | `tls.x509` | X.509 v3 certificate parsing (subject/issuer, validity, SPKI, extensions). | `tls.asn1`, `tls.bn`, `tls.ec`, `tls.rsa` |
-| `tls.certstore` | Trust store, chain building and signature/validity verification; `LoadWindowsSystemStore` (Windows only) populates a store from the system `Root`/`CA` stores via `crypt32.dll` (raises `TWinCertStoreError` on failure); `TCertStore` tracks ownership (`Add` vs `AddOwnedCert`). | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
+| `tls.certstore` | Trust store, chain building and signature/validity verification; `TCertStore` keeps a lookup index (canonical subject name and SKI, built as certificates are added) and tracks ownership (`Add` vs `AddOwnedCert`); PEM input comes from memory (`LoadPEMFromMemory`), from a stream (`LoadBundleFromStream`) or, as thin file wrappers, from `LoadPEM`/`LoadBundle`; `LoadWindowsSystemStore` (Windows only) populates a store from the system `Root`/`CA` stores via `crypt32.dll` (raises `TWinCertStoreError` on failure). | `tls.x509`, `tls.rsa`, `tls.ec`, `tls.sha2`, `tls.asn1` |
+| `tls.roottable` | Binary format of the embedded root table (header, 34-byte records, DER blobs, SHA-256 of the payload): validated `DecodeRootTable`, `CertStoreFromTable`/`BuildCertStore` builders that skip `DISTRUSTED` roots, typed `ECertBundleError`. No file or OS access. | `tls.certstore`, `tls.x509`, `tls.asn1` |
+| `tls.roots` | The only unit naming the root resource: `{$R tlsroots.res}` under `{$ifndef TLS_NO_EMBEDDED_ROOTS}`, `RT_RCDATA` named `TLSROOTS`, SHA-256 self-check of every read (`VerifyEmbeddedRootsSha256`), lazily built process-wide `EmbeddedRoots` store plus `EmbeddedRootsDate`, `EmbeddedRootsIsStale` and `ReleaseEmbeddedRoots`. | `tls.certstore`, `tls.roottable` |
 | `tls.prf` | TLS 1.2 PRF and key-schedule helpers (RFC 5246, RFC 7627). | `tls.hmac` |
 | `tls.tls12` | TLS 1.2 client: record layer, handshake, AEAD record protection, alerts, `ITLSTransport`, high-level `TTLS12Client`. | `tls.bn`, `tls.rand`, `tls.sha2`, `tls.hmac`, `tls.aes`, `tls.chacha20`, `tls.rsa`, `tls.ec`, `tls.dh`, `tls.prf`, `tls.x509`, `tls.certstore` |
 | `tls.tls13` | TLS 1.3 client (RFC 8446): HKDF key schedule, AEAD-only record layer, 1-RTT handshake, `TTLS13Client`; HelloRetryRequest/0-RTT are rejected. | `tls.tls12`, `tls.sha2`, `tls.hmac`, `tls.rand`, `tls.bn`, `tls.ec`, `tls.x25519`, `tls.rsa`, `tls.x509`, `tls.certstore`, `tls.aes`, `tls.chacha20` |
@@ -108,6 +117,52 @@ via `LoadWindowsSystemStore` (the handler owns and frees the store it
 loads itself). `DisableSystemStore := True` disables the Windows fallback:
 with no store configured, `Connect` then fails.
 
+## Embedded root certificates
+
+`tls.roots` makes a consumer independent of a PEM file next to the binary, of
+`/etc/ssl` and of the state of the OS store: the trusted roots travel inside
+the executable.
+
+- Source of truth in git: `certs/roots.pem` (a certifi/Mozilla snapshot),
+  `certs/roots.date` (snapshot date) and `certs/distrusted.txt` (SHA-256
+  fingerprints of roots to withhold).
+- `make roots` runs `tools/rootsgen`, which parses the snapshot with
+  `tls.x509`, sorts the records deterministically, writes the DER table and a
+  resource script under `build/roots/`, and compiles the script with `fpcres`
+  into `src/tlsroots.res`. Both artefacts are generated, not committed.
+- `src/tls.roots.pas` links the table in with `{$R tlsroots.res}` and reads it
+  back as the `RT_RCDATA` resource `TLSROOTS`, so no file is opened at run
+  time. `-dTLS_NO_EMBEDDED_ROOTS` (and `make` on a host without `fpcres`)
+  compiles the unit without the resource; it then raises `ECertBundleError`
+  instead of returning an empty store.
+- The table format lives in `tls.roottable`: a fixed header (magic `TLSROT`,
+  version, record count, snapshot date as Unix days, SHA-256 of the payload),
+  one 34-byte record per certificate (DER offset/length, subject hash,
+  optional 20-byte SKI, trust bit mask) and back-to-back DER blobs.
+  `DecodeRootTable` validates every length and offset against the real table
+  size before it trusts them; `CertStoreFromTable` parses the DER blobs into a
+  `TCertStore` the caller owns and skips records marked `DISTRUSTED`, so a
+  distrusted root can never become a trust anchor. A malformed or truncated
+  table raises `ECertBundleError`; a partially decoded table or store is never
+  returned.
+- Every read of the resource is integrity-checked: SHA-256 is recomputed over
+  the payload and compared with the digest in the header
+  (`VerifyEmbeddedRootsSha256`), so a resource truncated or replaced after
+  `make roots` fails loudly instead of silently weakening the trust store.
+- `EmbeddedRoots` builds the store on first use under a critical section and
+  caches it for the process (the resource is read and parsed at most once, and
+  the store is only searched, never mutated, afterwards, so concurrent
+  verification is safe). `EmbeddedRootsDate` reports the snapshot date,
+  `EmbeddedRootsIsStale(ANow, AMaxAgeDays = 365)` turns it into an age flag
+  (a flag, not an error), and `ReleaseEmbeddedRoots` drops the cache for tests
+  and leak checks.
+
+The embedded snapshot is a provider, not a policy: `tls.tlssocket` still
+resolves its trust store through `TrustStore`, `CertificateData.CertCA` and
+the Windows system store, and a consumer that wants the embedded roots creates
+the store with `EmbeddedRoots` and assigns it. Wiring it into the socket
+handler and the examples is a separate task.
+
 ## TLS 1.2 client
 
 `tls.tls12` implements the client side of RFC 5246:
@@ -168,6 +223,8 @@ tls.tlssocket  (TSSLSocketHandler-compatible handler)   [task 14]
 tls.tls12 / tls.tls13  (record layer + handshake)       [task 12, 13]
         |
         +--> tls.certstore  (verify server chain)       [task 11]
+        |      |
+        |      +--> tls.roottable -> tls.roots (embedded roots, optional) [task 19]
         +--> tls.prf / HKDF, tls.aes / tls.chacha20 (keys, AEAD)
         +--> tls.ec / tls.rsa / tls.dh (key exchange)
 
@@ -188,9 +245,9 @@ wired into `tls.tlssocket`; it is driven directly through `ITLSTransport` by
 
 - Units are named `tls.<area>.pas`; the `tls.` prefix avoids collisions with
   RTL/FCL units.
-- Errors are typed (`EBNError`, `EASN1Error`, `EX509Error`, `ETLS12Error`,
-  `ETLS13Error`, …) and raised on malformed input rather than returning
-  partial data.
+- Errors are typed (`EBNError`, `EASN1Error`, `EX509Error`,
+  `ECertBundleError`, `TWinCertStoreError`, `ETLS12Error`, `ETLS13Error`, …)
+  and raised on malformed input rather than returning partial data.
 - Secret-dependent comparisons are constant-time; secret material is never
   logged.
 - Randomness for keys, nonces and IVs comes from `tls.rand` only.
