@@ -175,9 +175,11 @@ generator, never at run time.
   table through `VerifyEmbeddedRootsSha256`, cache rebuild) and 13
   memory-reader cases in `tests/test_certverify.pas`.
 - `make roots` is the only step that needs `fpcres`, and it fails early with a
-  message when the tool is missing. Unlike the plan in the task spec, `build`,
-  `test` and `leaktest` do not depend on `src/tlsroots.res`: a fresh checkout
-  runs `make roots` once, or builds with `-dTLS_NO_EMBEDDED_ROOTS`.
+  message when the tool is missing. `build`, `test` and `leaktest` depend on
+  `src/tlsroots.res` (through the runner, which links `tests/test_roots.pas`)
+  and generate it on demand, so a fresh checkout needs no separate step. A
+  host without `fpcres` can still build with `-dTLS_NO_EMBEDDED_ROOTS`; the
+  resource tests then report a skip.
 
 ### Follow-up stages (tracked separately)
 
@@ -340,6 +342,9 @@ tracked as separate steps so the commit stays one task:
 - `PosEx` is not always available — use a local character search where
   needed.
 - Units are compiled into `build/`; never commit `*.o`/`*.ppu` build output.
+- With `TProcess`, reading a `poUsePipes` child's output to EOF does not
+  guarantee that it has been reaped: `ExitStatus` can still be -1. Call
+  `WaitOnExit` before reading it (`tools/rootsgen` starts `fpcres` this way).
 - A `{$...}` directive nested inside a `{}` comment produces a "Comment
   level 2" warning but is accepted; keep such combinations balanced.
 - A `raise;` statement directly in an `except` block followed by a
@@ -376,9 +381,10 @@ make roots      # regenerate src/tlsroots.res from certs/ (needs fpcres)
 vectors are kept. See [`openssl-reference.md`](openssl-reference.md).
 
 `make roots` is deterministic and is needed only when the snapshot in `certs/`
-changes or after a fresh checkout: `src/tlsroots.res` is generated and
-git-ignored, and `tls.roots` does not compile without it unless
-`-dTLS_NO_EMBEDDED_ROOTS` is given. `tests/test_roots.pas` pins the resulting
+changes: `src/tlsroots.res` is generated and git-ignored, and `tls.roots` does
+not compile without it unless `-dTLS_NO_EMBEDDED_ROOTS` is given. The test
+targets build it on demand, so a fresh checkout does not need a separate
+`make roots`. `tests/test_roots.pas` pins the resulting
 certificate count, snapshot date and `dataSha256`, so a refreshed snapshot has
 to update those constants in the same commit.
 

@@ -101,13 +101,16 @@ check-no-openssl:
 	done | grep -iE '\b(openssl|opensslsockets|fpopenssl)\b' \
 	  && { echo "ERROR: OpenSSL unit referenced in a uses clause"; exit 1; } \
 	  || echo "OK: no OpenSSL unit references"
-$(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES)
+# The runner links tests/test_roots.pas, which pulls in tls.roots and its
+# {$R tlsroots.res}. Make the generated resource a prerequisite so a fresh
+# checkout builds it automatically instead of failing on the missing file.
+$(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES) $(ROOTSRES)
 	@$(GMKDIR) $(TESTLIB) $(BIN)
 	$(FPC) $(FPCFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
 
 # Same runner built with heap tracing, so the leak checks can read heaptrc.
 # Kept apart from `make test`: tracing makes the crypto suites very slow.
-$(LEAKAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES)
+$(LEAKAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES) $(ROOTSRES)
 	@$(GMKDIR) $(LEAKLIB) $(BIN)
 	$(FPC) $(LEAKFLAGS) -Fu$(TESTS) -FU$(LEAKLIB) -FE$(BIN) \
 	  -o$(LEAKAPP) $(TESTS)/testrunner.lpr
