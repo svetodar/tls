@@ -784,9 +784,12 @@ begin
           '(install FPC''s fpcres or pass --fpcres PATH)',
           [AExecutable, E.Message]);
     end;
-    { Blocks until the child closes its end of the pipe, that is until it
-      exits: fpcres needs no input from us. }
+    { Blocks until the child closes its end of the pipe: fpcres needs no
+      input from us. The pipe can reach EOF a moment before the process is
+      fully reaped, and ExitStatus is only valid after that; without the
+      WaitOnExit a fast fpcres intermittently reports -1 despite succeeding. }
     Output := ReadPipeToEnd(Proc.Output);
+    Proc.WaitOnExit;
     if Proc.ExitStatus <> 0 then
       raise ERootsGenError.CreateFmt('%s failed with exit code %d: %s',
         [AExecutable, Proc.ExitStatus, Trim(Output)]);
