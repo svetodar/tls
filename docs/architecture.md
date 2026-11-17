@@ -125,7 +125,10 @@ the executable.
 
 - Source of truth in git: `certs/roots.pem` (a certifi/Mozilla snapshot),
   `certs/roots.date` (snapshot date) and `certs/distrusted.txt` (SHA-256
-  fingerprints of roots to withhold).
+  fingerprints of roots to withhold). Anchors outside the Mozilla set live in
+  `certs/extra/*.pem`, one trust anchor per file; they stay out of `roots.pem`
+  so that file remains a byte-identical copy of the certifi release and
+  `roots.date` keeps describing the Mozilla set, not the additions.
 - `make roots` runs `tools/rootsgen`, which parses the snapshot with
   `tls.x509`, sorts the records deterministically, writes the DER table and a
   resource script under `build/roots/`, and compiles the script with `fpcres`
@@ -134,6 +137,19 @@ the executable.
   a consumer that only puts `src/` on its unit path would otherwise fail with
   "Can't open resource file". `make check-roots` re-runs the generator into
   `build/roots/` and compares the result with the committed file.
+- Extra anchors enter the same table through the repeatable `--extra FILE`
+  option of `tools/rootsgen`: `make roots` expands every `certs/extra/*.pem`
+  into one `--extra` (wildcard order) and the generator appends those records
+  after the snapshot. An extra file is read like the snapshot and passes the
+  same checks (base64, DER length limit, X.509 parse, `distrusted.txt` trust
+  bits), so an extra root listed there is stored as `DISTRUSTED` and never
+  becomes a trust anchor. Each extra root is compared byte for byte over the
+  whole DER with everything already merged — snapshot plus earlier `--extra`
+  entries — and a duplicate aborts generation with the extra file, the subject
+  and the file the earlier copy came from, instead of storing two records for
+  one anchor; a path without a usable PEM block is likewise an error, never a
+  silent skip. The table format, the resource layout and `EmbeddedRoots` are
+  untouched, so a consumer still sees one flat trust store.
 - `src/tls.roots.pas` links the table in with `{$R tlsroots.res}` and reads it
   back as the `RT_RCDATA` resource `TLSROOTS`, so no file is opened at run
   time. `-dTLS_NO_EMBEDDED_ROOTS` (and `make` on a host without `fpcres`)

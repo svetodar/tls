@@ -86,9 +86,19 @@ ROOTSGEN_DEPS := tools/rootsgen/rootsgen.lpr \
 
 # Inputs of the table. distrusted.txt may legitimately be absent (no root is
 # distrusted then, which the generator accepts), so it joins the list only
-# when it exists and a change to it must trigger a regeneration.
+# when it exists and a change to it must trigger a regeneration. The same holds
+# for certs/extra/*.pem, the extra root files merged in with --extra: the
+# directory may be empty or missing, but every PEM dropped there must make the
+# resource look out of date.
+ROOTS_EXTRA := $(wildcard certs/extra/*.pem)
 ROOTS_INPUTS := certs/roots.pem certs/roots.date \
-  $(wildcard certs/distrusted.txt)
+  $(wildcard certs/distrusted.txt) \
+  $(ROOTS_EXTRA)
+
+# One --extra per file above, in the order make lists them (wildcard expands
+# in sorted order), so the same certs/ directory always yields the same table.
+# Empty when the directory holds no PEM, which leaves the command line intact.
+ROOTS_EXTRA_ARGS := $(foreach pem,$(ROOTS_EXTRA),--extra $(pem))
 
 all: test
 
@@ -164,7 +174,7 @@ roots: $(ROOTSRES)
 check-roots: $(ROOTSGEN) $(ROOTS_INPUTS) | check-fpcres
 	@$(GMKDIR) $(ROOTSTMP)
 	$(ROOTSGEN) --pem certs/roots.pem --date certs/roots.date \
-	  --distrusted certs/distrusted.txt \
+	  --distrusted certs/distrusted.txt $(ROOTS_EXTRA_ARGS) \
 	  --out $(ROOTSTMP)/roots.bin --rc $(ROOTSTMP)/tlsroots.check.rc \
 	  --res $(ROOTSTMP)/tlsroots.check.res --fpcres "$(FPCRES)"
 	@if cmp -s "$(ROOTSRES)" "$(ROOTSTMP)/tlsroots.check.res"; then \
@@ -204,7 +214,7 @@ $(ROOTSGEN): $(ROOTSGEN_DEPS)
 $(ROOTSRES): $(ROOTSGEN) $(ROOTS_INPUTS) | check-fpcres
 	@$(GMKDIR) $(ROOTSTMP)
 	$(ROOTSGEN) --pem certs/roots.pem --date certs/roots.date \
-	  --distrusted certs/distrusted.txt \
+	  --distrusted certs/distrusted.txt $(ROOTS_EXTRA_ARGS) \
 	  --out $(ROOTSTMP)/roots.bin --rc $(ROOTSTMP)/tlsroots.rc \
 	  --res $(ROOTSRES) --fpcres "$(FPCRES)"
 

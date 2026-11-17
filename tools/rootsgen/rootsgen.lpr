@@ -96,6 +96,13 @@ type
   { Base64 texts of the PEM blocks, in file order. }
   TRawStrings = array of RawByteString;
 
+  { A list of paths. A dynamic array rather than a TStringList keeps the tool
+    free of an allocation that has to be freed on every exit path. }
+  TPathList = array of string;
+
+  { Paths given with the repeatable --extra option, in command-line order. }
+  TExtraPaths = TPathList;
+
 { --- Small helpers --- }
 
 procedure Warn(const AMessage: string);
@@ -503,6 +510,85 @@ begin
   SetLength(Result, Count);
 end;
 
+{ True when the two byte arrays hold the same bytes. }
+function SameBytes(const A, B: TBytes): Boolean;
+var
+  I: LongInt;
+begin
+  if Length(A) <> Length(B) then
+    Exit(False);
+  for I := 0 to High(A) do
+    if A[I] <> B[I] then
+      Exit(False);
+  Result := True;
+end;
+
+{ Index of the first of the first ACount entries whose DER bytes equal ADer,
+  -1 when there is none. The whole certificate is compared, not only its
+  digest, so that a fingerprint collision can never make two different roots
+  look like one. }
+function FindEntryByDer(const AEntries: TRootGenEntries; ACount: LongInt;
+  const ADer: TBytes): LongInt;
+var
+  I: LongInt;
+begin
+  for I := 0 to ACount - 1 do
+    if SameBytes(AEntries[I].Der, ADer) then
+      Exit(I);
+  Result := -1;
+end;
+
+{ The main snapshot followed by every --extra file, in command-line order.
+
+  An extra root that is already in the table is an error, not a silent skip:
+  the table would then hold two records for one trust anchor, chain building
+  would pick whichever record the table order puts first, and the record count
+  would depend on the inputs in a way nothing reports. A duplicate nearly
+  always means that an extra file repeats part of the snapshot, or that the
+  same --extra path was given twice, so the message names the extra file and
+  the file the earlier copy came from.
+
+  A --extra file is read through LoadEntries, so its roots go through exactly
+  the same checks (base64, DER length limit, X.509 parse) and get the same
+  trust bits: an extra root that appears in certs/distrusted.txt is stored as
+  distrusted, never as a usable anchor. }
+function LoadAllEntries(const APEMPath: string; const AExtraPaths: TPathList;
+  ADistrusted: TStringList): TRootGenEntries;
+var
+  Origins: TPathList;
+  I, J, Count, Previous: LongInt;
+  Part: TRootGenEntries;
+begin
+  Result := LoadEntries(APEMPath, ADistrusted);
+  { Which file every entry came from, so that a duplicate can name both
+    sides; parallel to Result. }
+  Origins := nil;
+  SetLength(Origins, Length(Result));
+  for I := 0 to High(Origins) do
+    Origins[I] := APEMPath;
+
+  for I := 0 to High(AExtraPaths) do
+  begin
+    { A path without a single block, or with a broken one, raises here and
+      names the file: an unusable extra input must never yield a table that
+      silently lacks a root. }
+    Part := LoadEntries(AExtraPaths[I], ADistrusted);
+    Count := Length(Result);
+    SetLength(Origins, Count + Length(Part));
+    SetLength(Result, Count + Length(Part));
+    for J := 0 to High(Part) do
+    begin
+      Previous := FindEntryByDer(Result, Count + J, Part[J].Der);
+      if Previous >= 0 then
+        raise ERootsGenError.CreateFmt(
+          '%s: certificate "%s" is already in the table (from %s)',
+          [AExtraPaths[I], Part[J].Subject, Origins[Previous]]);
+      Result[Count + J] := Part[J];
+      Origins[Count + J] := AExtraPaths[I];
+    end;
+  end;
+end;
+
 { Lexicographic order of two SHA-256 digests: <0, 0, >0. }
 function CompareDigests(const A, B: TBytes): Integer;
 var
@@ -812,6 +898,7 @@ begin
     DEFAULT_DATE_PATH + ')');
   WriteLn('  --distrusted PATH  distrusted fingerprints (default: ' +
     DEFAULT_DISTRUSTED_PATH + ')');
+  WriteLn('  --extra PATH       one more PEM root file, repeatable (default: none)');
   WriteLn('  --out PATH         output table (default: ' + DEFAULT_OUT_PATH +
     ')');
   WriteLn('  --rc PATH          resource script (default: ' + DEFAULT_RC_PATH +
@@ -825,6 +912,15 @@ begin
   WriteLn('The table format is described in src/tls.roottable.pas; the');
   WriteLn('.rc script names the ' + RC_RESOURCE_NAME + ' RCDATA resource that');
   WriteLn('src/tls.roots.pas includes with {$R}.');
+  WriteLn;
+  WriteLn('--extra files are merged after the snapshot, in command-line order,');
+  WriteLn('and their roots go through the same checks and trust bits as the');
+  WriteLn('snapshot ones: a root listed in the distrusted file is never a usable');
+  WriteLn('anchor, wherever it came from. The merge is deduplicated by DER: a');
+  WriteLn('certificate already present in the snapshot, twice inside one --extra');
+  WriteLn('file, or reached twice through --extra aborts the build instead of');
+  WriteLn('adding a second record, because one trust anchor must never have two');
+  WriteLn('table entries.');
 end;
 
 { Value of an option that takes an argument: "rootsgen --pem FILE". }
@@ -841,6 +937,7 @@ var
   Arg: string;
   PEMPath, DatePath, DistrustedPath: string;
   OutPath, RcPath, ResPath, FpcResPath: string;
+  ExtraPaths: TExtraPaths;
   RcText: RawByteString;
   Entries: TRootGenEntries;
   Distrusted: TStringList;
@@ -850,6 +947,8 @@ var
 begin
   PEMPath := DEFAULT_PEM_PATH;
   DatePath := DEFAULT_DATE_PATH;
+  { No extra input unless --extra is given; the array stays nil. }
+  ExtraPaths := nil;
   DistrustedPath := DEFAULT_DISTRUSTED_PATH;
   OutPath := DEFAULT_OUT_PATH;
   RcPath := DEFAULT_RC_PATH;
@@ -872,6 +971,15 @@ begin
         DatePath := OptionValue(Arg, I)
       else if Arg = '--distrusted' then
         DistrustedPath := OptionValue(Arg, I)
+      else if Arg = '--extra' then
+      begin
+        { Repeatable: every occurrence appends one more PEM file to the
+          inputs, in command-line order. The paths are only collected here;
+          the merge with the main snapshot happens later, where a certificate
+          present twice is rejected. }
+        SetLength(ExtraPaths, Length(ExtraPaths) + 1);
+        ExtraPaths[High(ExtraPaths)] := OptionValue(Arg, I);
+      end
       else if Arg = '--out' then
         OutPath := OptionValue(Arg, I)
       else if Arg = '--rc' then
@@ -889,7 +997,9 @@ begin
     SnapshotUnixDays := ParseSnapshotDate(ReadWholeFile(DatePath), DatePath);
     Distrusted := LoadDistrustedFingerprints(DistrustedPath);
     try
-      Entries := LoadEntries(PEMPath, Distrusted);
+      { The snapshot and every --extra file, merged into one record set; a
+        certificate present twice raises. }
+      Entries := LoadAllEntries(PEMPath, ExtraPaths, Distrusted);
     finally
       Distrusted.Free;
     end;

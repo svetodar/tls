@@ -49,3 +49,9 @@ docs/reference/
 certs/roots.bin
 build/roots/
 !src/tlsroots.res
+# Additional trusted roots supplied as extra generator inputs
+# (task 20, docs/tasks/20-russian-trusted-root-ca.md). These PEM files are the
+# committed source of truth for `make roots --extra ...`, so the global `*.pem`
+# rule above must not hide them; the snapshot in certs/roots.pem and
+# src/tlsroots.res are rebuilt from them.
+!certs/extra/*.pem

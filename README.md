@@ -31,7 +31,7 @@ renegotiation, TLS 1.0/1.1, CBC suites and static-RSA key exchange are
 intentionally out of scope. TLS 1.3 does not implement 0-RTT/PSK
 resumption, HelloRetryRequest or KeyUpdate.
 
-Test suite: **`make test` → 385 tests, 0 errors, 0 failures** (FPC
+Test suite: **`make test` → 386 tests, 0 errors, 0 failures** (FPC
 3.2.2; the end-to-end tests are skipped when the `openssl` CLI or the
 regenerated certificate keys are unavailable).
 
@@ -78,9 +78,10 @@ examples/         example programs (https_client.pas)
 tests/            fpcunit tests, one unit per source area
 tests/fixtures/   certificates, DER vectors, fixture generator (gen_certs.sh)
 tests/tools/      standalone debugging programs (not part of the test run)
-certs/            inputs of the embedded root snapshot (roots.pem, roots.date,
-                  distrusted.txt) — see certs/README.md
-tools/rootsgen/   generator: PEM snapshot -> DER table -> tlsroots.res
+certs/            inputs of the embedded root bundle: the snapshot (roots.pem,
+                  roots.date, distrusted.txt) and extra anchors (extra/*.pem,
+                  merged with --extra) — see certs/README.md
+tools/rootsgen/   generator: PEM inputs -> DER table -> tlsroots.res
 docs/             design, plans, task specs, progress notes
 Makefile          build of the test runner
 build.sh          convenience wrapper around make
@@ -159,28 +160,39 @@ is required at build or run time.
 
 ## Embedded root certificates
 
-The library can carry a Mozilla root snapshot inside the executable, so a
-consumer needs neither a PEM bundle on disk nor the Windows certificate store
-to verify a chain. Four pieces take part:
+The library can carry a Mozilla root snapshot, plus extra anchors merged into
+the same table, inside the executable, so a consumer needs neither a PEM bundle
+on disk nor the Windows certificate store to verify a chain. Five pieces take
+part:
 
 | Path | Role |
 | --- | --- |
-| `certs/roots.pem`, `certs/roots.date`, `certs/distrusted.txt` | committed inputs: the snapshot (a verbatim certifi `cacert.pem`), its date, and the SHA-256 fingerprints of distrusted roots; provenance and the pinned digests are in [`certs/README.md`](certs/README.md) |
-| `tools/rootsgen/` | standalone generator: parses the PEM bundle with the library's own parser and writes a deterministic DER table, a `.rc` script and, through `fpcres`, `src/tlsroots.res` |
+| `certs/roots.pem`, `certs/roots.date`, `certs/distrusted.txt` | committed inputs of the snapshot: a verbatim certifi `cacert.pem`, its date, and the SHA-256 fingerprints of distrusted roots; provenance and the pinned digests are in [`certs/README.md`](certs/README.md) |
+| `certs/extra/*.pem` | committed extra anchors that are not in the Mozilla set — one self-signed root per file (currently the Russian Trusted Root CA) — merged into the same table by `tools/rootsgen --extra` |
+| `tools/rootsgen/` | standalone generator: parses the PEM bundle and every repeatable `--extra FILE` with the library's own parser and writes a deterministic DER table, a `.rc` script and, through `fpcres`, `src/tlsroots.res` |
 | `src/tls.roottable.pas` | the table format (`TLSROT` magic, header with snapshot date and SHA-256, fixed-size records, DER blobs) and its decoder; `BuildCertStore` turns it into a `TCertStore`, skipping records marked distrusted |
 | `src/tls.roots.pas` | links the resource with `{$R tlsroots.res}` and exposes it: `EmbeddedRoots` (a cached `TCertStore`), `EmbeddedRootsDate`, `EmbeddedRootsIsStale` |
 
 ```bash
-make roots      # certs/* -> build/roots/{roots.bin,tlsroots.rc} -> src/tlsroots.res
+make roots      # certs/ + certs/extra/*.pem -> build/roots/{roots.bin,tlsroots.rc}
+                #   -> src/tlsroots.res
 ```
+
+`make roots` passes every `certs/extra/*.pem` through `--extra`, so those
+anchors end up in the same table and are reachable through `EmbeddedRoots`
+exactly like the snapshot records: the library keeps one flat trust store and
+`tls.roots` needs no change to see them. The snapshot date is still the date of
+the Mozilla set, so `EmbeddedRootsDate`/`EmbeddedRootsIsStale` do not report on
+the extra files.
 
 `make roots` is the only step that needs `fpcres` (FPC's resource compiler,
 shipped with FPC; name it with `make roots FPCRES=/path/to/fpcres` when it is
-not on `PATH`). It is deterministic: the committed inputs always produce the
-same bytes, and `tests/test_roots.pas` pins the resulting certificate count,
-snapshot date and `dataSha256`, so a refreshed snapshot must update both
-together. `make check-roots` verifies that the committed resource still matches
-`certs/` without touching it.
+not on `PATH`). It is deterministic: the committed inputs — the snapshot and
+every extra PEM — always produce the same bytes, and `tests/test_roots.pas`
+pins the resulting certificate count, snapshot date and `dataSha256`, so a
+refreshed snapshot or a new extra anchor must update the resource and those
+constants together. `make check-roots` verifies that the committed resource
+still matches `certs/` (extra files included) without touching it.
 
 `src/tlsroots.res` is committed, because `{$R tlsroots.res}` is a *compile-time*
 dependency: FPC looks for the file next to `src/tls.roots.pas`, so a program that

@@ -20,15 +20,20 @@ unit test_roots;
   straight from the raw bytes, without DecodeRootTable, so a decoder bug
   cannot make the layout check pass.
 
-  The next three cases leave the artefact behind and look at real chains.
+  The next four cases leave the artefact behind and look at real chains.
   ISRG Root X1, the Let's Encrypt anchor, must be in the snapshot exactly
   once, must match the SHA-256 fingerprint and SubjectKeyIdentifier published
   for that certificate, must be findable through both indexes of the trust
   store, and must verify as a one-certificate chain ("root -> root") at the
-  snapshot date. The fixture chain (tests/fixtures/leaf_rsa.der ->
-  ca_rsa.der) is then anchored in a store built from the snapshot: without the
-  fixture CA the leaf must be rejected as unknown, and once that CA is added
-  the very same store must verify the two-certificate chain.
+  snapshot date. The Russian Trusted Root CA comes in through certs/extra
+  (`make roots --extra`) rather than the Mozilla snapshot, so it is checked
+  against its own published identity too: exactly one record, the subject its
+  publisher declares, the SHA-256 fingerprint of its DER, its
+  SubjectKeyIdentifier, CA:TRUE with pathlen:4 and its notAfter. The fixture
+  chain (tests/fixtures/leaf_rsa.der -> ca_rsa.der) is then anchored in a
+  store built from the snapshot: without the fixture CA the leaf must be
+  rejected as unknown, and once that CA is added the very same store must
+  verify the two-certificate chain.
 
   The digest is also exercised on its failure path: the resource cannot be
   corrupted from a test, so VerifyEmbeddedRootsSha256 is handed copies of the
@@ -72,6 +77,8 @@ type
     { --- A known public root, checked against published values --- }
     procedure TestIsrgRootX1IsPresent;
     procedure TestIsrgRootX1VerifyChain;
+    { --- A root merged in from certs/extra, checked against its subject --- }
+    procedure TestRussianTrustedRootCaIsPresent;
     { --- A chain from tests/fixtures, anchored in the snapshot --- }
     procedure TestFixtureChainVerifiesAgainstEmbeddedRoots;
     { --- The integrity self-check, on tampered copies --- }
@@ -94,17 +101,17 @@ uses
   tls.sha2, tls.roottable, tls.roots, tls.certstore, tls.x509;
 
 const
-  { Properties pinned for the snapshot committed in certs/roots.pem: 120
-    trusted roots dated 2026-10-22 (Unix days 20748) whose payload hashes to
-    the digest below. `make roots` prints the same three values; update them
-    here when the snapshot is refreshed. }
-  EXPECTED_RECORD_COUNT = 120;
+  { Properties pinned for the snapshot committed in certs/roots.pem plus the
+    extra roots in certs/extra/*.pem: 121 trusted roots dated 2026-10-22 (Unix
+    days 20748) whose payload hashes to the digest below. `make roots` prints
+    the same three values; update them here when the snapshot is refreshed. }
+  EXPECTED_RECORD_COUNT = 121;
   EXPECTED_SNAPSHOT_DAYS = 20748; { 2026-10-22 as Unix days, UTC }
   EXPECTED_SNAPSHOT_YEAR = 2026;
   EXPECTED_SNAPSHOT_MONTH = 10;
   EXPECTED_SNAPSHOT_DAY = 22;
   EXPECTED_PAYLOAD_SHA256 =
-    '391521bf207b7891ed90e9a967db17413c728eb2db1bcd0b291978928aad0dec';
+    '4fc1f93f8d8e384eeff60a3850e3b687f04922b8fa9330097b72bd157081eeb5';
 
   { Properties of ISRG Root X1 (the Let's Encrypt root), taken from the
     certificate Let's Encrypt publishes and printed by
@@ -118,8 +125,31 @@ const
     '96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6';
   ISRG_ROOT_X1_SKI = '79b459e67bb6e5e40173800888c81a58f6e99b6e';
 
-  { Name attributes used to recognise the root: O = 2.5.4.10 and
+  { Subject of the Russian Trusted Root CA, the anchor published by the
+    Ministry of Digital Development and Communications and shipped in
+    certs/extra/russian_trusted_root_ca.pem (merged by `make roots`): C=RU,
+    O=The Ministry of Digital Development and Communications, CN=Russian
+    Trusted Root CA. These are properties of that certificate, not of this
+    build, so they only fail if the extra input stops carrying it. }
+  RUSSIAN_TRUSTED_ROOT_CN = 'Russian Trusted Root CA';
+  RUSSIAN_TRUSTED_ROOT_ORG =
+    'The Ministry of Digital Development and Communications';
+  RUSSIAN_TRUSTED_ROOT_COUNTRY = 'RU';
+
+  { The rest of that root's published identity, so the case would notice a
+    different certificate with the same subject: the SHA-256 fingerprint of
+    its DER as the distribution prints it, its 20-byte SubjectKeyIdentifier,
+    BasicConstraints CA:TRUE with pathlen:4 and the end of its validity
+    period (2032-02-27 21:04:15 UTC). None of these depends on this build. }
+  RUSSIAN_TRUSTED_ROOT_SHA256 =
+    'd26d2d0231b7c39f92cc738512ba54103519e4405d68b5bd703e9788ca8ecf31';
+  RUSSIAN_TRUSTED_ROOT_SKI = 'e1d181e5ce5a5f04aad2e9b69d66b1c5faac2c87';
+  RUSSIAN_TRUSTED_ROOT_PATHLEN = 4;
+  RUSSIAN_TRUSTED_ROOT_NOTAFTER = '2032-02-27 21:04:15'; { UTC }
+
+  { Name attributes used to recognise the root: C = 2.5.4.6, O = 2.5.4.10 and
     CN = 2.5.4.3 (RFC 4514 / X.520). }
+  OID_COUNTRY = '2.5.4.6';
   OID_ORG = '2.5.4.10';
   OID_COMMON_NAME = '2.5.4.3';
 
@@ -176,6 +206,31 @@ begin
   for I := 0 to ATable.Count - 1 do
     if HexOf(SHA256(ATable.CertificateDer(I))) = ADigestHex then
       Inc(Result);
+end;
+
+{ How many certificates in ATable carry exactly the subject ACountry / AOrg /
+  ACN. Every DER blob is parsed and all three attributes compared, so a
+  look-alike issuer name (a different country or organisation) does not count
+  and the answer says whether the snapshot really carries that one root. }
+function CountBySubject(ATable: TRootTable; const ACN, AOrg,
+  ACountry: string): LongInt;
+var
+  I: LongInt;
+  Cert: TX509Cert;
+begin
+  Result := 0;
+  for I := 0 to ATable.Count - 1 do
+  begin
+    Cert := ParseCertificate(ATable.CertificateDer(I));
+    try
+      if (Cert.Subject.GetByOID(OID_COMMON_NAME) = ACN) and
+         (Cert.Subject.GetByOID(OID_ORG) = AOrg) and
+         (Cert.Subject.GetByOID(OID_COUNTRY) = ACountry) then
+        Inc(Result);
+    finally
+      Cert.Free;
+    end;
+  end;
 end;
 
 { First certificate of AStore whose CN is ACN, nil when there is none. The
@@ -487,6 +542,72 @@ begin
   finally
     Only.Free;
   end;
+end;
+
+{ The Russian Trusted Root CA is not part of the Mozilla snapshot: it travels
+  into the table as an --extra input of `make roots`. This case pins what a
+  merge can get wrong. The root must appear exactly once -- neither twice (the
+  merge must not duplicate a certificate the snapshot already carries) nor as
+  a look-alike -- and the certificate must still be the one its publisher
+  distributes: subject C=RU, O=The Ministry of Digital Development and
+  Communications, CN=Russian Trusted Root CA, the published SHA-256
+  fingerprint of its DER, its SubjectKeyIdentifier, BasicConstraints CA:TRUE
+  with pathlen:4 and notAfter 2032-02-27 21:04:15 UTC. All of these are read
+  back from the shipped table and the trust store built out of it; none of
+  them depends on this build, so the case fails only if the extra input stops
+  carrying the real root. }
+procedure TRootsTests.TestRussianTrustedRootCaIsPresent;
+var
+  Table: TRootTable;
+  Store: TCertStore;
+  Cert: TX509Cert;
+  Bc: TBasicConstraints;
+begin
+  Table := DecodeRootTable(EmbeddedRootsTableBytes);
+  try
+    AssertEquals('the snapshot must carry the Russian Trusted Root CA exactly once',
+      1, CountBySubject(Table, RUSSIAN_TRUSTED_ROOT_CN,
+        RUSSIAN_TRUSTED_ROOT_ORG, RUSSIAN_TRUSTED_ROOT_COUNTRY));
+
+    { The fingerprint pins the key, not just the name: a certificate that
+      merely repeats the subject and the organisation would not be counted. }
+    AssertEquals('the snapshot must carry the root with its published ' +
+      'SHA-256 fingerprint exactly once',
+      1, CountDerWithSha256(Table, RUSSIAN_TRUSTED_ROOT_SHA256));
+  finally
+    Table.Free;
+  end;
+
+  Store := EmbeddedRoots;
+  Cert := FindByCommonName(Store, RUSSIAN_TRUSTED_ROOT_CN);
+  AssertTrue('the Russian Trusted Root CA must be in the embedded trust store',
+    Cert <> nil);
+  AssertEquals('the root must keep its published common name',
+    RUSSIAN_TRUSTED_ROOT_CN, Cert.Subject.GetByOID(OID_COMMON_NAME));
+  AssertEquals('the root must keep its published organisation',
+    RUSSIAN_TRUSTED_ROOT_ORG, Cert.Subject.GetByOID(OID_ORG));
+  AssertEquals('the root must keep its published country',
+    RUSSIAN_TRUSTED_ROOT_COUNTRY, Cert.Subject.GetByOID(OID_COUNTRY));
+
+  { The 20 bytes the distribution prints as Subject Key Identifier; issuers of
+    chains below this root point at it through their AuthorityKeyIdentifier,
+    and FindBySKI resolves exactly that value. }
+  AssertEquals('the root must keep its published SubjectKeyIdentifier',
+    RUSSIAN_TRUSTED_ROOT_SKI, HexOf(Cert.GetSubjectKeyIdentifier));
+
+  { BasicConstraints as published: the anchor may sign intermediate CAs and
+    pathlen:4 caps how many CAs may sit below it. }
+  Bc := Cert.GetBasicConstraints;
+  AssertTrue('the root must be a CA', Bc.IsCA);
+  AssertEquals('the root must carry the published pathLenConstraint',
+    RUSSIAN_TRUSTED_ROOT_PATHLEN, Bc.PathLen);
+
+  { The end of the validity period as published. ReadTime returns UTC with
+    second precision, so the instant -- not just the year -- is compared: a
+    re-signed certificate with another expiry fails here. }
+  AssertEquals('the root must keep its published notAfter (UTC)',
+    RUSSIAN_TRUSTED_ROOT_NOTAFTER,
+    FormatDateTime('yyyy-mm-dd hh:nn:ss', Cert.NotAfter));
 end;
 
 { A chain unrelated to the snapshot -- tests/fixtures/leaf_rsa.der issued by

@@ -79,6 +79,7 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
 | 17 | `17-x25519.md` | 1 | 01, 02 |
 | 18 | `18-windows-default-cert-store.md` | 2, 4 | 10, 11, 14 |
 | 19 | `19-embedded-roots.md` | 2 | 03, 10, 11 |
+| 20 | `20-russian-trusted-root-ca.md` | 2 | 10, 11, 19 |
 
 ## Milestones
 
@@ -98,16 +99,21 @@ Each work item has a specification in [`docs/tasks/`](tasks/):
   three mandatory cipher suites). **Done** (2026-10-12; X25519 added in the
   wip merge, 2026-10-16).
 
-- **G — trust sources (18, 19).** On Windows the system `Root`/`CA` store is
+- **G — trust sources (18, 19, 20).** On Windows the system `Root`/`CA` store is
   the default trust source (`crypt32.dll`, the only external call the library
   makes), and a SHA-256-checked bundle of the Mozilla roots is linked into the
   executable instead of being read from a PEM file next to it. The file-based
-  `LoadPEM`/`LoadBundle` path is unchanged. **Done** (2026-10-22) on the
-  Windows FPC 3.2.2 target. Two stages are tracked separately and are not part
-  of this milestone's commit: the Linux verification run (`make roots` with the
-  Linux `fpcres`, then `make test`/`make leaktest`) and the integration into the
-  consuming `subag` project (bump `deps/tls`, make `EmbeddedRoots` the default
-  trust source, drop the "put ca-bundle.pem next to the program" message) — see
+  `LoadPEM`/`LoadBundle` path is unchanged. Anchors that are not in the
+  certifi snapshot are added as `certs/extra/*.pem` and merged by
+  `tools/rootsgen --extra` into the same table (task 20; the Russian Trusted
+  Root CA is the first such anchor, `count` = 121), so the snapshot stays a
+  verbatim upstream copy and the embedded table stays the single trust source.
+  **Done** (2026-10-22; extra anchors added 2026-11-17) on the Windows FPC
+  3.2.2 target. Two stages are tracked separately and are not part of these
+  commits: the Linux verification run (`make roots` with the Linux `fpcres`,
+  then `make test`/`make leaktest`) and the integration into the consuming
+  `subag` project (bump `deps/tls`, make `EmbeddedRoots` the default trust
+  source, drop the "put ca-bundle.pem next to the program" message) — see
   `docs/tasks/19-embedded-roots.md`, *Follow-up stages*.
 
 ## Risks

@@ -4,6 +4,12 @@
 # checkout (the repository otherwise runs with core.autocrlf on Windows).
 certs/roots.pem -text
 
+# Extra root certificates (certs/extra/*.pem) are byte-verbatim official
+# downloads as well: tools/rootsgen reads their DER fingerprint and the tests
+# pin it, so any line-ending rewrite on checkout would break the build. Keep
+# the bytes exactly as published.
+certs/extra/*.pem -text
+
 # src/tlsroots.res is a compiled resource that tls.roots links with {$R}: it
 # must reach the compiler byte for byte, or the SHA-256 self-check rejects the
 # checkout as corrupted. No end-of-line conversion, ever.

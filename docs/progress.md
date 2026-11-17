@@ -16,7 +16,7 @@ them.
 | F | TLS 1.3 client (RFC 8446, 1-RTT, HKDF, AEAD-only, X25519) | done |
 | G | trust sources: Windows system store, embedded root bundle | done |
 
-Test suite: `make test` → **385 tests, 0 errors, 0 failures** (FPC
+Test suite: `make test` → **386 tests, 0 errors, 0 failures** (FPC
 3.2.2); `make check-no-openssl` → no OpenSSL unit references. The
 end-to-end tests drive a real `openssl s_server` and are skipped when the
 `openssl` CLI is unavailable; the network-required test to `example.com` only
@@ -159,10 +159,11 @@ generator, never at run time.
   `AMaxAgeDays` is an `EArgumentOutOfRangeException`); `ReleaseEmbeddedRoots`
   drops both so that the next call rebuilds them. A failed attempt caches
   nothing, so the next call retries instead of seeing a half-built store.
-- Pinned by the tests: 120 roots (certifi `2026.10.19`, `certs/roots.pem`
-  238 856 bytes), snapshot date `2026-10-22` (Unix days 20748), table
-  132 677 bytes, `dataSha256 =
-  391521bf207b7891ed90e9a967db17413c728eb2db1bcd0b291978928aad0dec`. ISRG Root
+- Pinned by the tests: 121 records — the 120 certificates of the certifi
+  `2026.10.19` snapshot (`certs/roots.pem`, 238 856 bytes) plus the Russian
+  Trusted Root CA merged from `certs/extra/` (task 20, below) — snapshot date
+  `2026-10-22` (Unix days 20748), table 134 189 bytes, `dataSha256 =
+  4fc1f93f8d8e384eeff60a3850e3b687f04922b8fa9330097b72bd157081eeb5`. ISRG Root
   X1 is present exactly once (published DER SHA-256 `96bcec…08c6`, SKI
   `79b459e6…f6e99b6e`) and `VerifyChain(EmbeddedRoots, ISRG Root X1)`
   succeeds; an RSA chain from `tests/fixtures` verifies only after its CA is
@@ -170,10 +171,10 @@ generator, never at run time.
   and the store path end to end.
 - New tests: `tests/test_roottable.pas` (`TRootTableTests`, 27 cases: the valid
   table, every broken header/record, the `distrusted` filter),
-  `tests/test_roots.pas` (`TRootsTests`, 18 cases: pinned count/date/digest,
-  record layout, ISRG Root X1, fixture chain, staleness, tampered/truncated
-  table through `VerifyEmbeddedRootsSha256`, cache rebuild) and 13
-  memory-reader cases in `tests/test_certverify.pas`.
+  `tests/test_roots.pas` (`TRootsTests`, 19 cases: pinned count/date/digest,
+  record layout, ISRG Root X1, Russian Trusted Root CA, fixture chain,
+  staleness, tampered/truncated table through `VerifyEmbeddedRootsSha256`,
+  cache rebuild) and 13 memory-reader cases in `tests/test_certverify.pas`.
 - `make roots` is the only step that needs `fpcres`, and it fails early with a
   message when the tool is missing. `build`, `test` and `leaktest` depend on
   `src/tlsroots.res` (through the runner, which links `tests/test_roots.pas`)
@@ -202,6 +203,79 @@ tracked as separate steps so the commit stays one task:
   and keep the documented order explicit store → embedded roots → OS store →
   explicit opt-out. That change lives in the host repository and is its own
   pull request, not a change to this library.
+
+## Extra trust anchor: Russian Trusted Root CA (task 20)
+
+The Mozilla/NSS snapshot in `certs/roots.pem` is not the whole trust
+population a client needs, yet it has to stay a verbatim upstream copy. Roots
+that are missing from it live in `certs/extra/`, one PEM per anchor, and are
+merged into the *same* embedded table — `EmbeddedRoots` stays the single trust
+source of the library, and `tls.roots` / `tls.roottable` were not touched.
+
+- `tools/rootsgen` grew a repeatable `--extra PATH`. Every extra file is read
+  through the same `LoadEntries` as the snapshot, so base64, DER length, X.509
+  parsing and the trust/distrust bits are validated identically; a root that
+  `certs/distrusted.txt` names is stored distrusted wherever it came from.
+  Paths are collected in a dynamic array during argument parsing, so no
+  allocation needs a special exit path.
+- The origin file of every entry is tracked in a parallel array, and
+  duplicates are detected by comparing the whole DER (`SameBytes`), not a
+  digest. A certificate repeated in the snapshot, twice in one extra file or
+  reached twice through `--extra` aborts the run with an `ERootsGenError`
+  naming both files: no silent skip (which would make the record count depend
+  on the inputs invisibly) and never two records for one anchor. A missing,
+  unreadable or certificate-less extra file fails with its path.
+- The merge only adds records; the existing sort by `subjectHash`, then DER
+  digest, keeps the output deterministic.
+- `Makefile`: `ROOTS_EXTRA := $(wildcard certs/extra/*.pem)` joins
+  `ROOTS_INPUTS`, and `ROOTS_EXTRA_ARGS` splices one `--extra` pair per file
+  into the `roots` and `check-roots` command lines, so adding, editing or
+  deleting an extra PEM makes `src/tlsroots.res` look out of date. An empty or
+  missing directory leaves the command line exactly as in task 19.
+- `.gitignore` re-includes `certs/extra/*.pem` after the repository-wide
+  `*.pem` rule, and `.gitattributes` marks them `-text`: they are byte-exact
+  upstream downloads whose DER SHA-256 the tests pin, and a line-ending
+  rewrite on checkout would break the build.
+- `certs/extra/russian_trusted_root_ca.pem` is the published self-signed root
+  (`C=RU`, `O=The Ministry of Digital Development and Communications`,
+  `CN=Russian Trusted Root CA`, RSA 3072, `2022-03-01 .. 2032-02-27`,
+  DER SHA-256 `d26d2d02…ca8ecf31`, SKI `e1d181e5…faac2c87`, `CA:TRUE`,
+  `pathlen:4`), taken from
+  <https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt> on
+  2026-11-17. A `#` header records the provenance; `rootsgen` ignores `#`
+  lines. The vendor's "Russian Trusted Sub CA" is deliberately **not**
+  shipped: an intermediate is not a trust anchor, it arrives with the peer's
+  `certificate_list`.
+
+Pinned after the merge (the snapshot itself is unchanged):
+
+| field | task 19 | task 20 |
+| --- | --- | --- |
+| `count` | 120 | 121 |
+| DER payload | 128 549 bytes | 130 027 bytes |
+| table (`build/roots/roots.bin`) | 132 677 bytes | 134 189 bytes |
+| `dataSha256` | `391521bf…aad0dec` | `4fc1f93f8d8e384eeff60a3850e3b687f04922b8fa9330097b72bd157081eeb5` |
+| `src/tlsroots.res` | 132 757 bytes | 134 269 bytes |
+| SHA-256 of the resource | `61b206c9…b6e1a9aa` | `a6c517ca25a8740b8d01f676f39c87d972b214d1eae5f73ffdf40c1fcb8e0242` |
+
+The snapshot date stays `2026-10-22` (Unix days 20748): an extra anchor is not
+a snapshot refresh, and `EmbeddedRootsDate`/`EmbeddedRootsIsStale` keep
+reporting the age of the Mozilla set.
+
+`TRootsTests` now has **19** cases (the suite is 386 tests). The new
+`TestRussianTrustedRootCaIsPresent` asserts that the root is in the shipped
+table exactly once by subject and exactly once by published fingerprint — so a
+lost `--extra` input, a duplicated record and a replaced certificate each fail
+with their own message — and that the embedded store resolves it by CN with
+the published subject, SKI, `BasicConstraints` (`CA:TRUE`, `pathlen:4`) and
+`notAfter`. Its `CountBySubject` helper parses every DER blob and compares
+country, organisation and CN, so a look-alike issuer name is not counted.
+
+Acceptance run for the change: `make check-roots` (regenerates the resource
+from `certs/`, the extra PEM included, and reports it byte-identical),
+`make test` (386 tests) and `make check-no-openssl` (no OpenSSL unit
+reference). `make roots` run twice produces the same bytes, and a host without
+`certs/extra/` behaves exactly as in task 19.
 
 ## Verified vectors
 
