@@ -35,6 +35,9 @@ docs/reference/
 # Editors / OS noise
 .DS_Store
 *.bak
+# Local scratch notes in the repository root (task*.md and friends).
+# Task specs that belong to the project live in docs/tasks/ and are committed.
+/task*
 
 # Embedded root certificates (task 19, docs/tasks/19-embedded-roots.md).
 # The PEM snapshot and its metadata are the committed source of truth, so the
