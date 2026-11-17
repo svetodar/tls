@@ -471,13 +471,20 @@ in `tests/test_roots.pas` (certificate count, snapshot date, `dataSha256`)
 together — `make check-roots` compares the committed file with a fresh
 generation and fails when they have drifted apart.
 
-Running the end-to-end tests (TLS 1.2 and 1.3) requires the `*.key` files:
-run `make fixtures` to generate them (the keys are git-ignored). Without them
-the e2e tests are skipped. Rebuilding the fixtures also changes their keys,
-so the two reference signatures in `test_tls13.TestCertificateVerifySignatures`
-(`EC_SIG`, `RSA_SIG`) must be regenerated as the comment above that test
-describes; otherwise it fails with an "openssl ... signature verifies"
-assertion.
+The end-to-end tests (TLS 1.2, TLS 1.3 and the socket handler) do **not**
+read the git-ignored `*.key` files any more: `tests/e2e_support.pas`
+(`TE2EPki`) generates a throwaway CA and leaf certificate for the run with
+the `openssl` CLI into a private temporary directory and removes it again, so
+the tests depend on nothing but openssl itself. When openssl is missing the
+tests are skipped; when it is present but the server cannot be set up they
+fail with the reason instead of hanging, and every connect is bounded
+(`ConnectLocal`, `TInetSocket.Create(..., connectTimeout, ...)`).
+
+The `*.key` files of `make fixtures` are only needed to regenerate the two
+reference signatures in `test_tls13.TestCertificateVerifySignatures`
+(`EC_SIG`, `RSA_SIG`), as the comment above that test describes; those tests
+verify the pinned signatures with the *committed* certificates' public keys,
+so no key file is needed to run them.
 
 ## Resource-leak audit (2026-10-19)
 

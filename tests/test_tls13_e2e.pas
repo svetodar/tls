@@ -4,13 +4,18 @@ unit test_tls13_e2e;
   with a real `openssl s_server -tls1_3` server, following the pattern of
   tests/test_tls12_e2e.pas.
 
-  The test starts a local `openssl s_server -tls1_3 -www` with a test
-  certificate, connects via a TCP socket and drives the whole handshake
+  The test starts a local `openssl s_server -tls1_3 -www` with a certificate
+  and key, connects via a TCP socket and drives the whole handshake
   with TTLS13Client (ClientHello -> ServerHello/EncryptedExtensions/
   Certificate/CertificateVerify/Finished, then the client Finished),
   verifies the certificate chain, sends an HTTP request and checks the
-  response. If the openssl binary or the fixtures are unavailable, the test
-  is skipped. }
+  response.
+
+  The certificate, its private key and the CA the client trusts are generated
+  for the run by e2e_support.TE2EPki, so the test does not depend on the
+  git-ignored keys in tests/fixtures. If the openssl binary is unavailable the
+  test is skipped; if openssl is present but the PKI or the server cannot be
+  set up, it fails with a message instead of hanging or passing silently. }
 
 {$mode objfpc}{$H+}
 
@@ -30,7 +35,8 @@ type
 implementation
 
 uses
-  SysUtils, Classes, Process, ssockets, Sockets,
+  SysUtils, Classes, Process, ssockets,
+  e2e_support,
   tls.tls12, tls.tls13, tls.rand, tls.x509, tls.certstore;
 
 { ==================================================================== }
@@ -47,116 +53,14 @@ begin
     Result[i - 1] := Ord(S[i]);
 end;
 
-{ Fixture path: first from the current directory, then relative to
-  the executable's directory (bin/../tests/fixtures). }
-function FixturePath(const AName: string): string;
-begin
-  Result := 'tests' + PathDelim + 'fixtures' + PathDelim + AName;
-  if FileExists(Result) then
-    Exit;
-  Result := ExpandFileName(
-    ExtractFilePath(ParamStr(0)) + '..' + PathDelim +
-    'tests' + PathDelim + 'fixtures' + PathDelim + AName);
-end;
+{ The certificate, key, port and bounded connect helpers live in
+  e2e_support: this unit only drives the TLS 1.3 session. }
 
-{ Free TCP port: bind(0) on a temporary socket and read the assigned
-  port via getsockname. }
-function FindFreePort: Word;
-var
-  S: LongInt;
-  Addr: TInetSockAddr;
-  Len: LongInt;
-begin
-  S := fpSocket(AF_INET, SOCK_STREAM, 0);
-  if S < 0 then
-    raise Exception.Create('TLS 1.3 E2E: fpSocket() failed');
-  try
-    FillChar(Addr, SizeOf(Addr), 0);
-    Addr.sin_family := AF_INET;
-    Addr.sin_port := 0;
-    Addr.sin_addr.s_addr := htonl(INADDR_ANY);
-    if fpBind(S, @Addr, SizeOf(Addr)) <> 0 then
-      raise Exception.Create('TLS 1.3 E2E: fpBind() failed');
-    Len := SizeOf(Addr);
-    if fpGetSockName(S, @Addr, @Len) <> 0 then
-      raise Exception.Create('TLS 1.3 E2E: fpGetSockName() failed');
-    Result := ntohs(Addr.sin_port);
-  finally
-    CloseSocket(S);
-  end;
-end;
-
-{ Starts `openssl s_server -tls1_3 -www` with the given certificate,
-  cipher suite(s) and named group(s), returning the process (nil if openssl
-  is unavailable). }
-function StartOpenSSLServer(const ACert, AKey, ACipherSuites,
-  AGroups: string; out APort: Word): TProcess;
-var
-  P: TProcess;
-begin
-  Result := nil;
-  try
-    APort := FindFreePort;
-    P := TProcess.Create(nil);
-    P.Executable := 'openssl';
-    P.Parameters.Add('s_server');
-    P.Parameters.Add('-accept');
-    P.Parameters.Add(IntToStr(APort));
-    P.Parameters.Add('-cert');
-    P.Parameters.Add(ACert);
-    P.Parameters.Add('-key');
-    P.Parameters.Add(AKey);
-    P.Parameters.Add('-tls1_3');
-    P.Parameters.Add('-ciphersuites');
-    P.Parameters.Add(ACipherSuites);
-    P.Parameters.Add('-groups');
-    P.Parameters.Add(AGroups);
-    P.Parameters.Add('-www');
-    P.Parameters.Add('-naccept');
-    P.Parameters.Add('1');
-    P.Parameters.Add('-quiet');
-    P.Options := [poUsePipes];
-    try
-      P.Execute;
-      Result := P;
-    except
-      on E: Exception do
-      begin
-        P.Free;
-        Result := nil;
-      end;
-    end;
-  except
-    on E: Exception do
-      Result := nil;
-  end;
-end;
-
-{ Connect to the local server, waiting for the port to become ready. }
-function ConnectToServer(APort: Word): TInetSocket;
-var
-  i: Integer;
-begin
-  Result := nil;
-  for i := 1 to 100 do
-  begin
-    try
-      Result := TInetSocket.Create('127.0.0.1', APort);
-      Result.IOTimeout := 15000;
-      Exit;
-    except
-      on E: Exception do
-      begin
-        Result := nil;
-        Sleep(50);
-      end;
-    end;
-  end;
-end;
-
-{ Full TLS 1.3 handshake and HTTP exchange through TTLS13Client.
-  Raises ETLS13Error on any protocol/verification error. }
-procedure RunTLS13Session(APort: Word; const ACaCertPath: string;
+{ Full TLS 1.3 handshake and HTTP exchange through TTLS13Client over an
+  already established socket (the caller starts the server and connects, see
+  e2e_support.StartServerAndConnect). Raises ETLS13Error on any
+  protocol/verification error. }
+procedure RunTLS13Session(ASock: TInetSocket; const ACaCertPath: string;
   AExpectedSuite: TTLSCipherSuite; out AResponse: AnsiString);
 var
   Sock: TInetSocket;
@@ -172,10 +76,7 @@ var
   Opts: TTLS13ClientHelloOptions;
 begin
   AResponse := '';
-  Sock := ConnectToServer(APort);
-  if Sock = nil then
-    raise ETLS13Error.Create('failed to connect to openssl s_server');
-
+  Sock := ASock;
   Transport := nil;
   Client := nil;
   Store := nil;
@@ -234,38 +135,51 @@ begin
   end;
 end;
 
-{ General scenario: start openssl s_server, handshake, HTTP request. }
-procedure RunE2E(const ACertName, AKeyName, ACaName, ACipherSuites,
-  AGroups: string; ACipherSuite: TTLSCipherSuite);
+{ General scenario: generate a throwaway PKI, start openssl s_server, run the
+  handshake and check the HTTP response. Skipped only when openssl itself is
+  missing; every other failure raises, so a broken setup never passes silently
+  and never hangs (the server start and the connect are bounded and retried,
+  see e2e_support.StartServerAndConnect). }
+procedure RunE2E(AKind: TE2EKeyKind; const ACipherSuites, AGroups: string;
+  ACipherSuite: TTLSCipherSuite);
 var
-  CertPath, KeyPath, CaPath: string;
+  Pki: TE2EPki;
   P: TProcess;
   Port: Word;
+  Sock: TInetSocket;
   Response: AnsiString;
+  Reasons: string;
 begin
-  CertPath := FixturePath(ACertName);
-  KeyPath := FixturePath(AKeyName);
-  CaPath := FixturePath(ACaName);
-  if not (FileExists(CertPath) and FileExists(KeyPath) and
-    FileExists(CaPath)) then
-    Exit;   { fixtures missing — test skipped }
-
-  P := StartOpenSSLServer(CertPath, KeyPath, ACipherSuites, AGroups, Port);
-  if P = nil then
+  if not OpenSSLAvailable then
     Exit;   { openssl unavailable — test skipped }
 
-  Response := '';
+  Pki := TE2EPki.Create(AKind, 'localhost', 'localhost');
   try
-    RunTLS13Session(Port, CaPath, ACipherSuite, Response);
+    Sock := StartServerAndConnect(Pki.CertPath, Pki.KeyPath,
+      ['-tls1_3', '-ciphersuites', ACipherSuites, '-groups', AGroups, '-www'],
+      P, Port, Reasons);
+    if (Sock = nil) and (P = nil) then
+      Exit;   { openssl disappeared between the check and the start }
+    try
+      if Sock = nil then
+        raise ETLS13Error.CreateFmt(
+          'openssl s_server did not accept a connection on port %d: %s',
+          [Port, Reasons]);
 
-    if Length(Response) = 0 then
-      raise ETLS13Error.Create('server response not received');
-    if Pos('HTTP/1.0 200', Response) = 0 then
-      raise ETLS13Error.Create('no HTTP 200 from s_server: ' +
-        Copy(Response, 1, 64));
+      Response := '';
+      RunTLS13Session(Sock, Pki.CaCertPath, ACipherSuite, Response);
+
+      if Length(Response) = 0 then
+        raise ETLS13Error.Create('server response not received');
+      if Pos('HTTP/1.0 200', Response) = 0 then
+        raise ETLS13Error.Create('no HTTP 200 from s_server: ' +
+          Copy(Response, 1, 64));
+    finally
+      P.Terminate(0);
+      P.Free;
+    end;
   finally
-    P.Terminate(0);
-    P.Free;
+    Pki.Free;
   end;
 end;
 
@@ -275,14 +189,14 @@ end;
 
 procedure TTLS13E2ETests.TestHandshakeAndHttpWithOpenSSLServerRSA;
 begin
-  RunE2E('leaf_rsa.crt', 'leaf_rsa.key', 'ca_rsa.crt',
-    'TLS_AES_128_GCM_SHA256', 'P-256', TLS13CipherAES128GCMSHA256);
+  RunE2E(ekRSA, 'TLS_AES_128_GCM_SHA256', 'P-256',
+    TLS13CipherAES128GCMSHA256);
 end;
 
 procedure TTLS13E2ETests.TestHandshakeAndHttpWithOpenSSLServerEC;
 begin
-  RunE2E('leaf_ec.crt', 'leaf_ec.key', 'ca_ec.crt',
-    'TLS_AES_128_GCM_SHA256', 'P-256', TLS13CipherAES128GCMSHA256);
+  RunE2E(ekEC, 'TLS_AES_128_GCM_SHA256', 'P-256',
+    TLS13CipherAES128GCMSHA256);
 end;
 
 { SHA-384 key schedule and a P-384 key share. The certificate is RSA, so
@@ -290,8 +204,8 @@ end;
   scheme is independent of the cipher suite hash (RFC 8446, 4.4.3). }
 procedure TTLS13E2ETests.TestHandshakeAndHttpWithOpenSSLServerSHA384;
 begin
-  RunE2E('leaf_rsa.crt', 'leaf_rsa.key', 'ca_rsa.crt',
-    'TLS_AES_256_GCM_SHA384', 'P-384', TLS13CipherAES256GCMSHA384);
+  RunE2E(ekRSA, 'TLS_AES_256_GCM_SHA384', 'P-384',
+    TLS13CipherAES256GCMSHA384);
 end;
 
 initialization

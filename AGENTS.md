@@ -102,6 +102,12 @@ The library is layered bottom-up; a layer may only depend on layers below it:
 - A class property named `Length` shadows the global `Length()` inside that
   class — name such properties differently (`DataLength`).
 - `PosEx` is not always available — use a local character search when needed.
+- `TInetSocket.Create(host, port, ConnectTimeout, ...)` silently rounds the
+  timeout down to whole seconds: fcl-net's `CheckSocketConnectTimeout`
+  (ssockets.pp) does `tv_sec := Timeout div 1000` and then sets
+  `tv_usec := 0`. Any value below 1000 ms therefore becomes a zero timeout and
+  the connect fails at once with "Connection to host:port timed out" — pass at
+  least 1000 (preferably 2000) ms.
 - Units are compiled into `build/`; never commit build output, `*.o` or
   `*.ppu` files.
 

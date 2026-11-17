@@ -1,16 +1,20 @@
 { SPDX-License-Identifier: Apache-2.0 }
 unit test_tls12_e2e;
 { E2E test TLS 1.2 (milestone D): full client handshake and data exchange
-  with a real `openssl s_server` server (following the pattern of the integration test
-  test_mcp, which launches the bin/fakemcp process).
+  with a real `openssl s_server` server.
 
-  The test starts a local `openssl s_server -tls1_2 -www` with a test
-  certificate, connects via TCP socket and performs the full handshake
+  The test starts a local `openssl s_server -tls1_2 -www` with a certificate
+  and key, connects via TCP socket and performs the full handshake
   using tls.tls12 primitives (ClientHello -> ServerHello/Certificate/
   ServerKeyExchange/ServerHelloDone -> ClientKeyExchange -> CCS/Finished),
   verifies the certificate and the ServerKeyExchange signature, then sends
-  an HTTP request and verifies the response. If the openssl binary or fixtures
-  are unavailable, the test is skipped (like test_mcp without bin/fakemcp). }
+  an HTTP request and verifies the response.
+
+  The certificate, its private key and the CA the client trusts are generated
+  for the run by e2e_support.TE2EPki, so the test does not depend on the
+  git-ignored keys in tests/fixtures. If the openssl binary is unavailable the
+  test is skipped; if openssl is present but the PKI or the server cannot be
+  set up, it fails with a message instead of hanging or passing silently. }
 
 {$mode objfpc}{$H+}
 
@@ -29,7 +33,8 @@ type
 implementation
 
 uses
-  SysUtils, Classes, Process, ssockets, Sockets,
+  SysUtils, Classes, Process, ssockets,
+  e2e_support,
   tls.tls12, tls.prf, tls.rand, tls.sha2, tls.hmac, tls.x509,
   tls.certstore;
 
@@ -56,110 +61,8 @@ begin
     Result[i + 1] := AnsiChar(B[i]);
 end;
 
-{ Fixture path: first from the current directory, then relative to
-  the executable's directory (bin/../tests/fixtures). }
-function FixturePath(const AName: string): string;
-begin
-  Result := 'tests' + PathDelim + 'fixtures' + PathDelim + AName;
-  if FileExists(Result) then
-    Exit;
-  Result := ExpandFileName(
-    ExtractFilePath(ParamStr(0)) + '..' + PathDelim +
-    'tests' + PathDelim + 'fixtures' + PathDelim + AName);
-end;
-
-{ Free TCP port: bind(0) on a temporary socket and read the assigned
-  port via getsockname. }
-function FindFreePort: Word;
-var
-  S: LongInt;
-  Addr: TInetSockAddr;
-  Len: LongInt;
-begin
-  S := fpSocket(AF_INET, SOCK_STREAM, 0);
-  if S < 0 then
-    raise Exception.Create('TLS E2E: fpSocket() failed');
-  try
-    FillChar(Addr, SizeOf(Addr), 0);
-    Addr.sin_family := AF_INET;
-    Addr.sin_port := 0;
-    Addr.sin_addr.s_addr := htonl(INADDR_ANY);
-    if fpBind(S, @Addr, SizeOf(Addr)) <> 0 then
-      raise Exception.Create('TLS E2E: fpBind() failed');
-    Len := SizeOf(Addr);
-    if fpGetSockName(S, @Addr, @Len) <> 0 then
-      raise Exception.Create('TLS E2E: fpGetSockName() failed');
-    Result := ntohs(Addr.sin_port);
-  finally
-    CloseSocket(S);
-  end;
-end;
-
-{ Starts `openssl s_server -tls1_2 -www` with the given certificate and
-  cipher suite, returning the process (nil if openssl is unavailable). }
-function StartOpenSSLServer(const ACert, AKey, ACipher: string;
-  out APort: Word): TProcess;
-var
-  P: TProcess;
-begin
-  Result := nil;
-  try
-    APort := FindFreePort;
-    P := TProcess.Create(nil);
-    P.Executable := 'openssl';
-    P.Parameters.Add('s_server');
-    P.Parameters.Add('-accept');
-    P.Parameters.Add(IntToStr(APort));
-    P.Parameters.Add('-cert');
-    P.Parameters.Add(ACert);
-    P.Parameters.Add('-key');
-    P.Parameters.Add(AKey);
-    P.Parameters.Add('-tls1_2');
-    P.Parameters.Add('-cipher');
-    P.Parameters.Add(ACipher);
-    P.Parameters.Add('-www');
-    P.Parameters.Add('-naccept');
-    P.Parameters.Add('1');
-    P.Parameters.Add('-quiet');
-    P.Options := [poUsePipes];
-    try
-      P.Execute;
-      Result := P;
-    except
-      on E: Exception do
-      begin
-        P.Free;
-        Result := nil;
-      end;
-    end;
-  except
-    on E: Exception do
-      Result := nil;
-  end;
-end;
-
-{ Connect to the local server waiting for the port to become ready. }
-function ConnectToServer(APort: Word): TInetSocket;
-var
-  i: Integer;
-begin
-  Result := nil;
-  for i := 1 to 100 do
-  begin
-    try
-      Result := TInetSocket.Create('127.0.0.1', APort);
-      Result.IOTimeout := 8000;
-      Exit;
-    except
-      on E: Exception do
-      begin
-        Result := nil;
-        Sleep(50);
-      end;
-    end;
-  end;
-end;
-
+{ The certificate, key, port and bounded connect helpers live in
+  e2e_support: this unit only drives the TLS 1.2 session. }
 { Full TLS 1.2 client handshake and HTTP exchange over the transport.
   Raises ETLS12Error on any protocol/verification error. }
 procedure RunTLS12Session(ATransport: ITLSTransport;
@@ -327,49 +230,58 @@ begin
   end;
 end;
 
-{ General scenario: start openssl s_server, handshake, HTTP request. }
-procedure RunE2E(const ACertName, AKeyName, ACaName, ACipher: string;
+{ General scenario: generate a throwaway PKI, start openssl s_server, run the
+  handshake and check the HTTP response. Skipped only when openssl itself is
+  missing; every other failure raises, so a broken setup never passes silently
+  and never hangs (the server start and the connect are bounded and retried,
+  see e2e_support.StartServerAndConnect). }
+procedure RunE2E(AKind: TE2EKeyKind; const ACipher: string;
   ACipherSuite: TTLSCipherSuite);
 var
-  CertPath, KeyPath, CaPath: string;
+  Pki: TE2EPki;
   P: TProcess;
   Port: Word;
   Sock: TInetSocket;
   Transport: ITLSTransport;
   Response: AnsiString;
+  Reasons: string;
 begin
-  CertPath := FixturePath(ACertName);
-  KeyPath := FixturePath(AKeyName);
-  CaPath := FixturePath(ACaName);
-  if not (FileExists(CertPath) and FileExists(KeyPath) and
-    FileExists(CaPath)) then
-    Exit;   { fixtures missing — test skipped }
-
-  P := StartOpenSSLServer(CertPath, KeyPath, ACipher, Port);
-  if P = nil then
+  if not OpenSSLAvailable then
     Exit;   { openssl unavailable — test skipped }
 
-  Sock := nil;
-  Transport := nil;
+  Pki := TE2EPki.Create(AKind, 'localhost', 'localhost');
   try
-    Sock := ConnectToServer(Port);
-    if Sock = nil then
-      raise ETLS12Error.Create('failed to connect to openssl s_server');
+    Sock := StartServerAndConnect(Pki.CertPath, Pki.KeyPath,
+      ['-tls1_2', '-cipher', ACipher, '-www'], P, Port, Reasons);
+    if (Sock = nil) and (P = nil) then
+      Exit;   { openssl disappeared between the check and the start }
+    try
+      if Sock = nil then
+        raise ETLS12Error.CreateFmt(
+          'openssl s_server did not accept a connection on port %d: %s',
+          [Port, Reasons]);
 
-    Transport := TTLSStreamTransport.Create(Sock);
-    RunTLS12Session(Transport, ACipherSuite, CaPath, Response);
-    Transport := nil;
+      Transport := nil;
+      try
+        Transport := TTLSStreamTransport.Create(Sock);
+        RunTLS12Session(Transport, ACipherSuite, Pki.CaCertPath, Response);
+        Transport := nil;
+      finally
+        Transport := nil;
+        Sock.Free;
+      end;
 
-    if Length(Response) = 0 then
-      raise ETLS12Error.Create('server response not received');
-    if Pos('HTTP/1.0 200', Response) = 0 then
-      raise ETLS12Error.Create('no HTTP 200 from s_server: ' +
-        Copy(Response, 1, 64));
+      if Length(Response) = 0 then
+        raise ETLS12Error.Create('server response not received');
+      if Pos('HTTP/1.0 200', Response) = 0 then
+        raise ETLS12Error.Create('no HTTP 200 from s_server: ' +
+          Copy(Response, 1, 64));
+    finally
+      P.Terminate(0);
+      P.Free;
+    end;
   finally
-    Transport := nil;
-    Sock.Free;
-    P.Terminate(0);
-    P.Free;
+    Pki.Free;
   end;
 end;
 
@@ -379,14 +291,14 @@ end;
 
 procedure TTLSE2ETests.TestHandshakeAndHttpWithOpenSSLServerRSA;
 begin
-  RunE2E('leaf_rsa.crt', 'leaf_rsa.key', 'ca_rsa.crt',
-    'ECDHE-RSA-AES128-GCM-SHA256', TLSCipherECDHE_RSA_AES128GCM_SHA256);
+  RunE2E(ekRSA, 'ECDHE-RSA-AES128-GCM-SHA256',
+    TLSCipherECDHE_RSA_AES128GCM_SHA256);
 end;
 
 procedure TTLSE2ETests.TestHandshakeAndHttpWithOpenSSLServerEC;
 begin
-  RunE2E('leaf_ec.crt', 'leaf_ec.key', 'ca_ec.crt',
-    'ECDHE-ECDSA-AES128-GCM-SHA256', TLSCipherECDHE_ECDSA_AES128GCM_SHA256);
+  RunE2E(ekEC, 'ECDHE-ECDSA-AES128-GCM-SHA256',
+    TLSCipherECDHE_ECDSA_AES128GCM_SHA256);
 end;
 
 initialization

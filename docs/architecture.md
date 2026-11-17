@@ -261,6 +261,13 @@ example `uses` clause pulls in the FPC OpenSSL bindings. `tls.tls13` is not yet
 wired into `tls.tlssocket`; it is driven directly through `ITLSTransport` by
 `tests/test_tls13_e2e.pas` and `tests/tools/tls13_client.pas`.
 
+The tests that need a live TLS server (`test_tls12_e2e`, `test_tls13_e2e`,
+`test_tlssocket`) share `tests/e2e_support.pas`: it generates a throwaway CA
+and leaf certificate with the `openssl` CLI for the run and provides a
+bounded connect, so those tests need neither fixture key material nor an
+unbounded wait. `openssl` remains the only external reference they use, and
+only as a server/interoperability partner.
+
 ## Conventions
 
 - Units are named `tls.<area>.pas`; the `tls.` prefix avoids collisions with

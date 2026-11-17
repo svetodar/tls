@@ -2,10 +2,11 @@
 unit test_tlssocket;
 { Tests for the TLS socket handler (layer 4, task 14).
 
-  The handler is exercised against a real local `openssl s_server` with the
-  test certificates in tests/fixtures (the same external reference used by
-  test_tls12_e2e). When `openssl` or the fixtures are missing the tests
-  silently pass (skipped), matching the existing E2E convention. One test
+  The handler is exercised against a real local `openssl s_server` whose
+  certificate, key and CA are generated for the run by e2e_support (the same
+  external reference used by test_tls12_e2e). When `openssl` is missing the
+  tests silently pass (skipped), matching the existing E2E convention; a
+  present but broken setup fails with a message instead. One test
   additionally exercises the Windows default system-store fallback (task 18)
   and is skipped off-Windows; a network-required test against example.com
   runs only when TLS_TEST_NETWORK=1. }
@@ -37,7 +38,8 @@ type
 implementation
 
 uses
-  SysUtils, Classes, Process, ssockets, sslsockets, Sockets,
+  SysUtils, Classes, Process, ssockets, sslsockets,
+  e2e_support,
   tls.tlssocket, tls.certstore;
 
 { Result of a single connection attempt. }
@@ -48,149 +50,73 @@ type
 { Helpers                                                              }
 { ==================================================================== }
 
-function FixturePath(const AName: string): string;
-begin
-  Result := 'tests' + PathDelim + 'fixtures' + PathDelim + AName;
-  if FileExists(Result) then
-    Exit;
-  Result := ExpandFileName(
-    ExtractFilePath(ParamStr(0)) + '..' + PathDelim +
-    'tests' + PathDelim + 'fixtures' + PathDelim + AName);
-end;
+{ The end-to-end tests need a server certificate with its private key and a CA
+  to trust. Both are generated once per run by e2e_support.TE2EPki instead of
+  being read from tests/fixtures, whose keys are git-ignored: a checkout
+  either has no keys at all or keys from another generation than the committed
+  certificates, and s_server then refuses to start. The shapes the tests need
+  (a valid localhost leaf, a leaf for a name that does not match, and an
+  unrelated CA for the "unknown CA" case) are generated on demand and kept for
+  the rest of the run, because every generation costs an RSA key. }
+type
+  TPkiKind = (pkRsa, pkEc, pkWrongHost, pkOtherCa);
 
-function FindFreePort: Word;
 var
-  S: LongInt;
-  Addr: TInetSockAddr;
-  Len: LongInt;
+  GPkis: array[TPkiKind] of TE2EPki;
+
+function GetPki(AKind: TPkiKind): TE2EPki;
 begin
-  S := fpSocket(AF_INET, SOCK_STREAM, 0);
-  if S < 0 then
-    raise Exception.Create('TLS socket test: fpSocket() failed');
-  try
-    FillChar(Addr, SizeOf(Addr), 0);
-    Addr.sin_family := AF_INET;
-    Addr.sin_port := 0;
-    Addr.sin_addr.s_addr := htonl(INADDR_ANY);
-    if fpBind(S, @Addr, SizeOf(Addr)) <> 0 then
-      raise Exception.Create('TLS socket test: fpBind() failed');
-    Len := SizeOf(Addr);
-    if fpGetSockName(S, @Addr, @Len) <> 0 then
-      raise Exception.Create('TLS socket test: fpGetSockName() failed');
-    Result := ntohs(Addr.sin_port);
-  finally
-    CloseSocket(S);
-  end;
+  if GPkis[AKind] = nil then
+    case AKind of
+      pkRsa:
+        GPkis[AKind] := TE2EPki.Create(ekRSA, 'localhost', 'localhost');
+      pkEc:
+        GPkis[AKind] := TE2EPki.Create(ekEC, 'localhost', 'localhost');
+      pkWrongHost:
+        GPkis[AKind] := TE2EPki.Create(ekRSA, 'wrong.example.com',
+          'wrong.example.com,other.example.com');
+      pkOtherCa:
+        GPkis[AKind] := TE2EPki.Create(ekEC, 'unrelated.example.com',
+          'unrelated.example.com');
+    end;
+  Result := GPkis[AKind];
 end;
 
-{ Starts `openssl s_server` with the given leaf certificate and cipher suite.
-  Returns nil (and the test should skip) when openssl or the fixture files
-  are unavailable. }
-function StartServer(const ACertName, AKeyName, ACipher: string;
+{ Starts `openssl s_server -tls1_2 -www` with the certificate and key of APki.
+  Returns nil (and the test skips) when openssl is unavailable. }
+function StartServer(const APki: TE2EPki; const ACipher: string;
   out APort: Word): TProcess;
-var
-  CertPath, KeyPath: string;
-  P: TProcess;
 begin
-  Result := nil;
-  APort := 0;
-  CertPath := FixturePath(ACertName);
-  KeyPath := FixturePath(AKeyName);
-  if not (FileExists(CertPath) and FileExists(KeyPath)) then
-    Exit;
-  try
-    APort := FindFreePort;
-    P := TProcess.Create(nil);
-    P.Executable := 'openssl';
-    P.Parameters.Add('s_server');
-    P.Parameters.Add('-accept');
-    P.Parameters.Add(IntToStr(APort));
-    P.Parameters.Add('-cert');
-    P.Parameters.Add(CertPath);
-    P.Parameters.Add('-key');
-    P.Parameters.Add(KeyPath);
-    P.Parameters.Add('-tls1_2');
-    P.Parameters.Add('-cipher');
-    P.Parameters.Add(ACipher);
-    P.Parameters.Add('-www');
-    P.Parameters.Add('-naccept');
-    P.Parameters.Add('1');
-    P.Parameters.Add('-quiet');
-    P.Options := [poUsePipes];
-    try
-      P.Execute;
-      Result := P;
-    except
-      on E: Exception do
-      begin
-        P.Free;
-        Result := nil;
-      end;
-    end;
-  except
-    on E: Exception do
-      Result := nil;
-  end;
+  Result := StartOpenSSLServer(APki.CertPath, APki.KeyPath,
+    ['-tls1_2', '-cipher', ACipher, '-www'], APort);
 end;
 
-{ Starts `openssl s_server -WWW` (static file server) rooted at AWorkDir.
-  Used to exercise a large, multi-record response body. }
-function StartWwwServer(const AWorkDir: string; out APort: Word): TProcess;
-var
-  CertPath, KeyPath: string;
-  P: TProcess;
+{ Starts `openssl s_server -tls1_2 -WWW` (static file server) rooted at
+  AWorkDir, used to exercise a large, multi-record response body. }
+function StartWwwServer(const APki: TE2EPki; const AWorkDir: string;
+  out APort: Word): TProcess;
 begin
-  Result := nil;
-  APort := 0;
-  {CurrentDirectory is changed, so the certificate paths must be absolute.}
-  CertPath := ExpandFileName(FixturePath('leaf_rsa.crt'));
-  KeyPath := ExpandFileName(FixturePath('leaf_rsa.key'));
-  if not (FileExists(CertPath) and FileExists(KeyPath)) then
-    Exit;
-  try
-    APort := FindFreePort;
-    P := TProcess.Create(nil);
-    P.Executable := 'openssl';
-    P.CurrentDirectory := AWorkDir;
-    P.Parameters.Add('s_server');
-    P.Parameters.Add('-accept');
-    P.Parameters.Add(IntToStr(APort));
-    P.Parameters.Add('-cert');
-    P.Parameters.Add(CertPath);
-    P.Parameters.Add('-key');
-    P.Parameters.Add(KeyPath);
-    P.Parameters.Add('-tls1_2');
-    P.Parameters.Add('-cipher');
-    P.Parameters.Add('ECDHE-RSA-AES128-GCM-SHA256');
-    P.Parameters.Add('-WWW');
-    P.Parameters.Add('-naccept');
-    P.Parameters.Add('1');
-    P.Parameters.Add('-quiet');
-    P.Options := [poUsePipes];
-    try
-      P.Execute;
-      Result := P;
-    except
-      on E: Exception do
-      begin
-        P.Free;
-        Result := nil;
-      end;
-    end;
-  except
-    on E: Exception do
-      Result := nil;
-  end;
+  Result := StartOpenSSLServer(APki.CertPath, APki.KeyPath,
+    ['-tls1_2', '-cipher', 'ECDHE-RSA-AES128-GCM-SHA256', '-WWW'], APort,
+    AWorkDir);
 end;
 
 { One attempt: create the socket + handler and run the handshake. Returns
   coNotReady when the TCP connection itself could not be established (the
   server is probably not listening yet), coFailed for a TLS/verification
-  failure and coOK on success. }
+  failure and coOK on success. ATrustCAPath is a PEM bundle path, '' for "no
+  explicit trust store". }
 function AttemptConnect(const AHost: string; APort: Word; AVerify: Boolean;
-  ATrustCA: string; out ASock: TInetSocket;
+  const ATrustCAPath: string; out ASock: TInetSocket;
   out AHandler: TTLSSocketHandler; out AError: string;
   ADisableSystemStore: Boolean = False): TConnectOutcome;
+const
+  { Bounded connect: a blocking connect to a port that nothing listens on can
+    wait for the whole SYN retransmit timeout on every attempt. A whole number
+    of seconds is required: FPC 3.2.2 truncates the value to tv_sec and zeroes
+    tv_usec (fcl-net/ssockets.pp, CheckSocketConnectTimeout), so 1000 ms is the
+    smallest useful value. }
+  ConnectTimeoutMs = 2000;
 var
   H: TTLSSocketHandler;
   Store: TCertStore;
@@ -205,13 +131,13 @@ begin
   try
     H.VerifyPeerCert := AVerify;
     H.DisableSystemStore := ADisableSystemStore;
-    if ATrustCA <> '' then
+    if ATrustCAPath <> '' then
     begin
-      Store := LoadBundle(FixturePath(ATrustCA));
+      Store := LoadBundle(ATrustCAPath);
       H.TrustStore := Store;
     end;
     try
-      ASock := TInetSocket.Create(AHost, APort, H);
+      ASock := TInetSocket.Create(AHost, APort, ConnectTimeoutMs, H);
       SockCreated := True;
       ASock.IOTimeout := 8000;
       ASock.Connect;
@@ -245,23 +171,24 @@ begin
 end;
 
 { Creates a socket with the handler and performs the TLS handshake, retrying
-  briefly while the freshly started test server is not yet accepting.
-  On success returns the socket; on failure returns nil with the reason. }
+  while the freshly started test server is not yet accepting. The deadline is
+  absolute, so a server that died cannot keep the test waiting: on failure the
+  function returns nil with the reason. }
 function TryConnect(const AHost: string; APort: Word; AVerify: Boolean;
-  ATrustCA: string; out AHandler: TTLSSocketHandler;
+  const ATrustCAPath: string; out AHandler: TTLSSocketHandler;
   out AError: string; ADisableSystemStore: Boolean = False): TInetSocket;
 const
-  MaxAttempts = 100;
+  TotalTimeoutMs = 15000;
 var
-  Attempt: Integer;
+  Deadline: QWord;
   Outcome: TConnectOutcome;
 begin
   Result := nil;
   AHandler := nil;
   AError := '';
-  for Attempt := 1 to MaxAttempts do
-  begin
-    Outcome := AttemptConnect(AHost, APort, AVerify, ATrustCA,
+  Deadline := GetTickCount64 + TotalTimeoutMs;
+  repeat
+    Outcome := AttemptConnect(AHost, APort, AVerify, ATrustCAPath,
       Result, AHandler, AError, ADisableSystemStore);
     case Outcome of
       coOK:
@@ -275,7 +202,7 @@ begin
           Exit;
         end;
     end;
-  end;
+  until GetTickCount64 >= Deadline;
   AError := 'timed out waiting for ' + AHost + ':' + IntToStr(APort);
   Result := nil;
 end;
@@ -355,7 +282,8 @@ var
 begin
   {Disable the Windows system-store fallback so the test still exercises
     the strict "no trust store" failure path on every platform.}
-  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkRsa),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
@@ -387,10 +315,11 @@ var
 {$endif}
 begin
 {$ifdef windows}
-  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkRsa),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
-    Exit;   { openssl or fixtures unavailable — skipped }
+    Exit;   { openssl unavailable — skipped }
   Sock := nil;
   try
     Sock := TryConnect('localhost', Port, True, '', H, Err);
@@ -453,14 +382,17 @@ var
   H: TTLSSocketHandler;
   Err: string;
 begin
-  {Server offers a chain signed by ca_rsa, the client trusts ca_ec.}
-  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+  {Server offers a chain signed by the RSA test CA, the client trusts an
+    unrelated CA.}
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkRsa),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
   Sock := nil;
   try
-    Sock := TryConnect('localhost', Port, True, 'ca_ec.crt', H, Err);
+    Sock := TryConnect('localhost', Port, True,
+      GetPki(pkOtherCa).CaCertPath, H, Err);
     AssertTrue('connect must fail with an unknown CA', Sock = nil);
     AssertTrue('reason is not empty', Err <> '');
   finally
@@ -479,13 +411,15 @@ var
   Err: string;
 begin
   {The certificate is signed by the trusted CA but has no SAN for localhost.}
-  P := StartServer('mismatch_rsa.crt', 'mismatch_rsa.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkWrongHost),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
   Sock := nil;
   try
-    Sock := TryConnect('localhost', Port, True, 'ca_rsa.crt', H, Err);
+    Sock := TryConnect('localhost', Port, True,
+      GetPki(pkWrongHost).CaCertPath, H, Err);
     AssertTrue('connect must fail on host mismatch', Sock = nil);
     AssertTrue('reason mentions the host', Pos('host', Err) > 0);
   finally
@@ -504,7 +438,8 @@ var
   Err: string;
   Req, Resp: AnsiString;
 begin
-  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkRsa),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
@@ -534,13 +469,15 @@ var
   Err: string;
   Req, Resp: AnsiString;
 begin
-  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkRsa),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
   Sock := nil;
   try
-    Sock := TryConnect('localhost', Port, True, 'ca_rsa.crt', H, Err);
+    Sock := TryConnect('localhost', Port, True,
+      GetPki(pkRsa).CaCertPath, H, Err);
     AssertTrue('verified connect: ' + Err, Sock <> nil);
     AssertTrue('SSL active', H.SSLActive);
     Req := 'GET / HTTP/1.0'#13#10'Host: localhost'#13#10#13#10;
@@ -564,13 +501,15 @@ var
   Err: string;
   Req, Resp: AnsiString;
 begin
-  P := StartServer('leaf_ec.crt', 'leaf_ec.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkEc),
     'ECDHE-ECDSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
   Sock := nil;
   try
-    Sock := TryConnect('localhost', Port, True, 'ca_ec.crt', H, Err);
+    Sock := TryConnect('localhost', Port, True,
+      GetPki(pkEc).CaCertPath, H, Err);
     AssertTrue('verified connect: ' + Err, Sock <> nil);
     Req := 'GET / HTTP/1.0'#13#10'Host: localhost'#13#10#13#10;
     AssertEquals('request fully sent', Length(Req),
@@ -598,8 +537,8 @@ var
   Err: string;
   Req, Resp, Body: AnsiString;
 begin
-  if not FileExists(FixturePath('leaf_rsa.crt')) then
-    Exit;   { fixtures missing — skipped }
+  if not OpenSSLAvailable then
+    Exit;   { openssl unavailable — skipped }
 
   WorkDir := IncludeTrailingPathDelimiter(GetTempDir) +
     'tls_www_' + IntToStr(GetProcessID);
@@ -614,7 +553,7 @@ begin
     F.Free;
   end;
 
-  P := StartWwwServer(WorkDir, Port);
+  P := StartWwwServer(GetPki(pkRsa), WorkDir, Port);
   if P = nil then
   begin
     DeleteFile(BodyPath);
@@ -656,13 +595,15 @@ var
   Buf: array[0..4095] of Byte;
   N: Integer;
 begin
-  P := StartServer('leaf_rsa.crt', 'leaf_rsa.key',
+  if not OpenSSLAvailable then Exit;
+  P := StartServer(GetPki(pkRsa),
     'ECDHE-RSA-AES128-GCM-SHA256', Port);
   if P = nil then
     Exit;
   Sock := nil;
   try
-    Sock := TryConnect('localhost', Port, True, 'ca_rsa.crt', H, Err);
+    Sock := TryConnect('localhost', Port, True,
+      GetPki(pkRsa).CaCertPath, H, Err);
     AssertTrue('verified connect: ' + Err, Sock <> nil);
     Req := 'GET / HTTP/1.0'#13#10'Host: localhost'#13#10#13#10;
     H.Send(Req[1], Length(Req));
@@ -705,5 +646,13 @@ end;
 
 initialization
   RegisterTest(TTLSSocketTests);
+
+finalization
+  { Release the PKIs generated during the run: each one owns a temporary
+    directory that its destructor removes. }
+  FreeAndNil(GPkis[pkRsa]);
+  FreeAndNil(GPkis[pkEc]);
+  FreeAndNil(GPkis[pkWrongHost]);
+  FreeAndNil(GPkis[pkOtherCa]);
 
 end.
