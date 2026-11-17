@@ -85,8 +85,10 @@ The library is layered bottom-up; a layer may only depend on layers below it:
 ## Crypto engineering rules
 
 - Secret-dependent data must be compared in constant time; never branch on or
-  log secret material. Test keys are the only exception and stay in
-  `tests/fixtures/` (git-ignored).
+  log secret material. Test key material is the only exception: the generator
+  keys in `tests/fixtures/` (git-ignored, rebuilt by `make fixtures`) and the
+  throwaway keys that `tests/e2e_support.pas` creates in a private temporary
+  directory for the end-to-end tests.
 - Randomness comes from `tls.rand` only; never use `Random()`/`RandSeed` for
   key material, nonces or IVs.
 - Reject malformed input loudly: parsers (DER, X.509, handshake, records) must
