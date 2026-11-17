@@ -351,10 +351,13 @@ tracked as separate steps so the commit stays one task:
   `finally` clause is not parsed; nest the `try/except` inside an outer
   `try/finally` (used in `LoadWindowsSystemStore`).
 - `{$R file.res}` in a unit is a hard compile-time dependency: a missing
-  `.res` is a fatal error, not a link error, so a build of a component that
-  leaves `tls.roots` in the uses clause needs `make roots` first — or
-  `-dTLS_NO_EMBEDDED_ROOTS`, which drops the `{$R}` and makes every embedded
-  roots call raise `ECertBundleError`.
+  `.res` is a fatal error ("Can't open resource file"), not a link error, and
+  FPC looks for it next to the unit, not in the search path of the *including*
+  project. Hence `src/tlsroots.res` is a committed file of the repository: a
+  consumer that only puts `src/` on its unit path builds without `make roots`,
+  and `check-roots-file` in the Makefile turns a missing file into a readable
+  message. `-dTLS_NO_EMBEDDED_ROOTS` drops the `{$R}` altogether and makes
+  every embedded roots call raise `ECertBundleError`.
 - `RT_RCDATA` is not defined by `SysUtils`: it comes from `System` on some
   targets and from `windows` on Windows — `uses Classes, SysUtils {$ifdef
   windows}, Windows {$endif}` compiles both ways.
@@ -374,6 +377,7 @@ tracked as separate steps so the commit stays one task:
 make test       # build tests and run them
 make fixtures   # regenerate tests/fixtures (needs openssl + python3)
 make roots      # regenerate src/tlsroots.res from certs/ (needs fpcres)
+make check-roots # verify the committed src/tlsroots.res still matches certs/
 ```
 
 `make fixtures` needs the OpenSSL 3.5.9 sources in `./OpenSSL/` for the eight
@@ -381,12 +385,17 @@ make roots      # regenerate src/tlsroots.res from certs/ (needs fpcres)
 vectors are kept. See [`openssl-reference.md`](openssl-reference.md).
 
 `make roots` is deterministic and is needed only when the snapshot in `certs/`
-changes: `src/tlsroots.res` is generated and git-ignored, and `tls.roots` does
-not compile without it unless `-dTLS_NO_EMBEDDED_ROOTS` is given. The test
-targets build it on demand, so a fresh checkout does not need a separate
-`make roots`. `tests/test_roots.pas` pins the resulting
-certificate count, snapshot date and `dataSha256`, so a refreshed snapshot has
-to update those constants in the same commit.
+changes. `src/tlsroots.res` is **committed**: `{$R tlsroots.res}` is resolved
+by the compiler next to `src/tls.roots.pas`, so a checkout on another host, or
+a consuming project that only adds `src/` to its unit path, builds without
+running `make` — the reason the file cannot stay a local artefact. `.gitignore`
+re-includes it after the global `*.res` rule and `.gitattributes` marks it
+`-text`, so a checkout cannot corrupt its bytes; the test targets only check
+that it is present (`check-roots-file`). After a snapshot refresh run
+`make roots` **and** commit the new resource, `certs/` and the constants pinned
+in `tests/test_roots.pas` (certificate count, snapshot date, `dataSha256`)
+together — `make check-roots` compares the committed file with a fresh
+generation and fails when they have drifted apart.
 
 Running the end-to-end tests (TLS 1.2 and 1.3) requires the `*.key` files:
 run `make fixtures` to generate them (the keys are git-ignored). Without them

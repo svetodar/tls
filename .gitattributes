@@ -3,3 +3,8 @@
 # is checked against them, so git must not rewrite its line endings on
 # checkout (the repository otherwise runs with core.autocrlf on Windows).
 certs/roots.pem -text
+
+# src/tlsroots.res is a compiled resource that tls.roots links with {$R}: it
+# must reach the compiler byte for byte, or the SHA-256 self-check rejects the
+# checkout as corrupted. No end-of-line conversion, ever.
+src/tlsroots.res -text

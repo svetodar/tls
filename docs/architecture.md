@@ -129,7 +129,11 @@ the executable.
 - `make roots` runs `tools/rootsgen`, which parses the snapshot with
   `tls.x509`, sorts the records deterministically, writes the DER table and a
   resource script under `build/roots/`, and compiles the script with `fpcres`
-  into `src/tlsroots.res`. Both artefacts are generated, not committed.
+  into `src/tlsroots.res`. The DER table and the script are throw-away;
+  `src/tlsroots.res` is committed, because `{$R}` is resolved at compile time:
+  a consumer that only puts `src/` on its unit path would otherwise fail with
+  "Can't open resource file". `make check-roots` re-runs the generator into
+  `build/roots/` and compares the result with the committed file.
 - `src/tls.roots.pas` links the table in with `{$R tlsroots.res}` and reads it
   back as the `RT_RCDATA` resource `TLSROOTS`, so no file is opened at run
   time. `-dTLS_NO_EMBEDDED_ROOTS` (and `make` on a host without `fpcres`)

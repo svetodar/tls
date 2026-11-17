@@ -48,11 +48,10 @@ task 19 — see *Follow-up stages* in `docs/tasks/19-embedded-roots.md`.
   without it those two tests are skipped;
 - `openssl` + `python3` — needed only to regenerate the test fixtures
   (`make fixtures`);
-- `fpcres` — the resource compiler shipped with FPC — needed by
-  `make roots`, which compiles the root snapshot into `src/tlsroots.res`.
-  That file is generated and not tracked; the test targets build it on demand,
-  so a fresh checkout can go straight to `make test` (or build with
-  `-dTLS_NO_EMBEDDED_ROOTS` to leave the resource out); see
+- `fpcres` — the resource compiler shipped with FPC — needed only to regenerate
+  `src/tlsroots.res` (`make roots`) after `certs/` changes, and by
+  `make check-roots`. The resource itself is committed, so building the library
+  or a program that uses it needs neither `fpcres` nor `make roots`; see
   *Embedded root certificates* below.
 
 ## Build and test
@@ -67,6 +66,7 @@ make check-no-openssl  # verify no library/example uses clause pulls in openssl
 ./build.sh      # same as "make test", with a gmkdir shim when needed
 make fixtures   # regenerate certificate and DER fixtures (openssl + python3)
 make roots      # regenerate src/tlsroots.res from certs/ (needs fpcres)
+make check-roots # verify the committed src/tlsroots.res matches certs/
 make clean
 ```
 
@@ -179,13 +179,24 @@ shipped with FPC; name it with `make roots FPCRES=/path/to/fpcres` when it is
 not on `PATH`). It is deterministic: the committed inputs always produce the
 same bytes, and `tests/test_roots.pas` pins the resulting certificate count,
 snapshot date and `dataSha256`, so a refreshed snapshot must update both
-together. `src/tlsroots.res` is generated and not tracked. The test targets
-(`make`, `make test`, `make leaktest`) build it on demand through `make roots`,
-so a fresh checkout needs no extra step; run `make roots` explicitly after
-changing `certs/`. Alternatively, build with `-dTLS_NO_EMBEDDED_ROOTS`, which
-compiles the unit without the resource — every embedded-roots call then raises
-`ECertBundleError` instead of silently trusting nothing, and only the tests in
-`tests/test_roots.pas` (they expect a resource) fail on such a host.
+together. `make check-roots` verifies that the committed resource still matches
+`certs/` without touching it.
+
+`src/tlsroots.res` is committed, because `{$R tlsroots.res}` is a *compile-time*
+dependency: FPC looks for the file next to `src/tls.roots.pas`, so a program that
+just puts `src/` on its unit path — a consumer on another host, a checkout built
+with its own build files — finds it there and links the roots without running
+`make` at all. `.gitattributes` marks it binary so a checkout cannot corrupt it
+(the SHA-256 self-check would reject that), and `.gitignore` re-includes it after
+the global `*.res` rule. Rebuild it with `make roots` after changing `certs/`
+and commit it in the same commit as the snapshot and the pinned test constants;
+the test targets only check that the file is present, so they never need
+`fpcres`.
+
+Alternatively, build with `-dTLS_NO_EMBEDDED_ROOTS`, which compiles the unit
+without the resource — every embedded-roots call then raises `ECertBundleError`
+instead of silently trusting nothing, and only the tests in `tests/test_roots.pas`
+(they expect a resource) fail on such a host.
 
 Using the embedded store takes one assignment; the handler does not take
 ownership of a `TrustStore` assigned this way:

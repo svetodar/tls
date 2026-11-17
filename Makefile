@@ -8,6 +8,7 @@
 #   make leaktest   build the runner with heap tracing and run the leak checks
 #   make fixtures   (re)generate tests/fixtures with OpenSSL and Python 3
 #   make roots      regenerate src/tlsroots.res from certs/ (FPC fpcres)
+#   make check-roots verify that the committed src/tlsroots.res matches certs/
 #   make clean      remove build output
 
 FPC      ?= fpc
@@ -58,6 +59,15 @@ TESTUNITS := $(wildcard $(TESTS)/*.pas)
 # fpcres, the FPC resource compiler: it is the only external program the
 # target needs. Point FPCRES at it when it is not on PATH; on a host without
 # fpcres the library can still be built with -dTLS_NO_EMBEDDED_ROOTS.
+#
+# $(ROOTSRES) itself is committed, because {$R} is resolved by the compiler: a
+# program that only puts src/ on its unit path — a consumer on another host, a
+# checkout built without make — must find the resource next to the unit, just
+# as it finds the .pas file. The build rules below therefore never regenerate
+# it implicitly: they check that it is present (check-roots-file) and, in
+# `make check-roots`, that it still matches certs/. Rebuild it with
+# `make roots` and commit it together with the snapshot and the constants
+# pinned in tests/test_roots.pas.
 FPCRES   ?= fpcres
 ROOTSGEN := $(BIN)/rootsgen$(EXEEXT)
 ROOTSTMP := $(BUILD)/roots
@@ -102,15 +112,17 @@ check-no-openssl:
 	  && { echo "ERROR: OpenSSL unit referenced in a uses clause"; exit 1; } \
 	  || echo "OK: no OpenSSL unit references"
 # The runner links tests/test_roots.pas, which pulls in tls.roots and its
-# {$R tlsroots.res}. Make the generated resource a prerequisite so a fresh
-# checkout builds it automatically instead of failing on the missing file.
-$(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES) $(ROOTSRES)
+# {$R tlsroots.res}. The resource is committed, so no rule builds it here;
+# check-roots-file (order-only, so it never forces a rebuild) only stops the
+# run with a clear message when the file is missing, instead of letting fpc
+# fail with "Can't open resource file".
+$(TESTAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES) | check-roots-file
 	@$(GMKDIR) $(TESTLIB) $(BIN)
 	$(FPC) $(FPCFLAGS) -Fu$(TESTS) -FU$(TESTLIB) -FE$(BIN) $(TESTS)/testrunner.lpr
 
 # Same runner built with heap tracing, so the leak checks can read heaptrc.
 # Kept apart from `make test`: tracing makes the crypto suites very slow.
-$(LEAKAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES) $(ROOTSRES)
+$(LEAKAPP): $(TESTUNITS) $(TESTS)/testrunner.lpr $(SOURCES) | check-roots-file
 	@$(GMKDIR) $(LEAKLIB) $(BIN)
 	$(FPC) $(LEAKFLAGS) -Fu$(TESTS) -FU$(LEAKLIB) -FE$(BIN) \
 	  -o$(LEAKAPP) $(TESTS)/testrunner.lpr
@@ -125,9 +137,44 @@ fixtures:
 
 # --- Embedded roots: rules (task 19) ----------------------------------------
 
+# Fail with instructions instead of a compiler puzzle when the committed
+# resource is missing (a deleted file, a copy of src/ taken without it). Phony,
+# so it is evaluated on every build; used order-only, so it never forces a
+# rebuild.
+check-roots-file:
+	@if [ ! -f "$(ROOTSRES)" ]; then \
+	  echo "ERROR: $(ROOTSRES) is missing, but src/tls.roots.pas links it with"; \
+	  echo "       {\$$R}, which FPC resolves at compile time."; \
+	  echo "       It is a committed file; restore it with"; \
+	  echo "         git checkout -- $(ROOTSRES)"; \
+	  echo "       or rebuild it from certs/ with 'make roots' (needs fpcres),"; \
+	  echo "       or compile with -dTLS_NO_EMBEDDED_ROOTS to leave it out."; \
+	  exit 1; \
+	fi
+
 # Regenerate the embedded trust table and the resource the library links.
-# Deterministic: the same committed inputs give byte-identical output.
+# Deterministic: the same committed inputs give byte-identical output. Commit
+# the new $(ROOTSRES) together with the snapshot and with the constants pinned
+# in tests/test_roots.pas.
 roots: $(ROOTSRES)
+
+# Check that the committed resource still is what certs/ produces: regenerate
+# into $(ROOTSTMP) and compare byte for byte. Needs fpcres, never writes
+# $(ROOTSRES).
+check-roots: $(ROOTSGEN) $(ROOTS_INPUTS) | check-fpcres
+	@$(GMKDIR) $(ROOTSTMP)
+	$(ROOTSGEN) --pem certs/roots.pem --date certs/roots.date \
+	  --distrusted certs/distrusted.txt \
+	  --out $(ROOTSTMP)/roots.bin --rc $(ROOTSTMP)/tlsroots.check.rc \
+	  --res $(ROOTSTMP)/tlsroots.check.res --fpcres "$(FPCRES)"
+	@if cmp -s "$(ROOTSRES)" "$(ROOTSTMP)/tlsroots.check.res"; then \
+	  echo "OK: $(ROOTSRES) matches certs/"; \
+	else \
+	  echo "ERROR: $(ROOTSRES) is out of date with certs/."; \
+	  echo "       Run 'make roots' and commit the result together with the"; \
+	  echo "       constants pinned in tests/test_roots.pas."; \
+	  exit 1; \
+	fi
 
 # Fail early — before the generator is compiled — with a message that says
 # what to do, instead of a puzzle from a program that is not there.
@@ -151,8 +198,11 @@ $(ROOTSGEN): $(ROOTSGEN_DEPS)
 
 # PEM snapshot -> DER table + .rc -> src/tlsroots.res. check-fpcres is an
 # order-only prerequisite: it runs first, but being phony it must not make the
-# resource look out of date on every build.
+# resource look out of date on every build. The result is a committed file, so
+# this rule only runs when someone asks for it or when certs/ was changed by
+# hand — and then the new resource belongs in the same commit as the snapshot.
 $(ROOTSRES): $(ROOTSGEN) $(ROOTS_INPUTS) | check-fpcres
+	@$(GMKDIR) $(ROOTSTMP)
 	$(ROOTSGEN) --pem certs/roots.pem --date certs/roots.date \
 	  --distrusted certs/distrusted.txt \
 	  --out $(ROOTSTMP)/roots.bin --rc $(ROOTSTMP)/tlsroots.rc \
@@ -162,9 +212,8 @@ clean:
 	rm -rf $(BUILD) $(BIN)
 	rm -f $(SRC)/*.o $(SRC)/*.ppu $(TESTS)/*.o $(TESTS)/*.ppu
 	rm -f $(TESTS)/tools/*.o $(TESTS)/tools/*.ppu
-# The generated resource is build output too: it is ignored by git and
-# regenerated by `make roots`.
-	rm -f $(SRC)/*.res
+# $(ROOTSRES) is deliberately left alone: it is a committed source of the unit,
+# not build output. Remove it only to force `make roots`.
 
-.PHONY: all build test leaktest fixtures roots check-fpcres example \
-	check-no-openssl clean
+.PHONY: all build test leaktest fixtures roots check-roots check-roots-file \
+	check-fpcres example check-no-openssl clean

@@ -1,9 +1,11 @@
 # `certs/` — inputs of the embedded root snapshot
 
-Committed *inputs* of `tools/rootsgen`. The generated artefacts
-(`build/roots/`, `src/tlsroots.res`, `certs/roots.bin`) are not tracked; run
-`make roots` to rebuild them. Certificates are public data: nothing secret is
-committed here.
+Committed *inputs* of `tools/rootsgen`. The intermediate artefacts
+(`build/roots/`, `certs/roots.bin`) are not tracked; run `make roots` to
+rebuild them. The compiled resource `src/tlsroots.res` is tracked as well:
+`tls.roots` links it with `{$R}`, which the compiler resolves next to the unit,
+so the file has to travel with the sources. Certificates are public data:
+nothing secret is committed here.
 
 ## Files
 

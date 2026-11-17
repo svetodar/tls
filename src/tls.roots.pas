@@ -22,13 +22,20 @@ unit tls.roots;
 
   The compiler directive below (`$R tlsroots.res`) embeds the table into
   the unit, which the compiler then links into the program that uses it.
+  FPC resolves the directive at compile time, so the resource has to sit
+  next to this unit: src/tlsroots.res is committed (git keeps it binary and
+  .gitignore re-includes it after the global `*.res` rule), so a program that
+  only puts src/ on its unit path — a consumer on another host, a checkout
+  built without make — compiles as-is. `make roots` rebuilds the file when the
+  snapshot in certs/ changes; commit it together with the snapshot.
   Build with -dTLS_NO_EMBEDDED_ROOTS (or make without fpcres) to compile
   the unit without the resource: it still compiles and raises
   ECertBundleError with a clear message instead of returning an empty
   trust store.
 
-  The PEM snapshot stays the source of truth in git; src/tlsroots.res is
-  generated, not committed. }
+  The PEM snapshot stays the source of truth in git: the committed resource
+  is a deterministic function of it, and tests/test_roots.pas pins the
+  resulting count, snapshot date and payload digest. }
 
 {$mode objfpc}{$H+}
 

@@ -38,9 +38,14 @@ docs/reference/
 
 # Embedded root certificates (task 19, docs/tasks/19-embedded-roots.md).
 # The PEM snapshot and its metadata are the committed source of truth, so the
-# global `*.pem` rule above must not hide them. Everything generated from them
-# is a build artefact and is ignored.
+# global `*.pem` rule above must not hide them. The intermediate table and the
+# resource script under build/roots/ are build artefacts and are ignored.
+# src/tlsroots.res is the exception: tls.roots links it with {$R}, which FPC
+# resolves at compile time, so a program that only puts src/ on its unit path
+# (or a checkout on another host) needs the file to be present. It is committed
+# and rebuilt by `make roots` when certs/ changes; .gitattributes keeps git from
+# rewriting its bytes.
 !certs/roots.pem
 certs/roots.bin
-src/tlsroots.res
 build/roots/
+!src/tlsroots.res
